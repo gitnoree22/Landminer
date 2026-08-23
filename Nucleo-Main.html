@@ -10,7 +10,12 @@
   #err{position:fixed;left:8px;top:8px;color:#ff7070;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;z-index:99;display:none;max-width:80vw;background:rgba(0,0,0,.7);padding:6px}
   #probe{display:none}
   #load{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#6fe3d2;font:15px Consolas,monospace;letter-spacing:.5em;text-shadow:0 0 18px #0fa}
-  body.playing{cursor:crosshair}
+  body.playing{cursor:none}
+  #crt-overlay{position:fixed;inset:0;pointer-events:none;z-index:40;display:none;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0px,rgba(0,0,0,0) 2px,rgba(0,0,0,0.18) 3px,rgba(0,0,0,0) 4px);mix-blend-mode:multiply;opacity:0.55}
+  body.crt-on #crt-overlay{display:block}
+  #xhair{position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:41;display:none;transform:translate(-50%,-50%)}
+  body.playing #xhair{display:block}
+  #xhair svg{width:100%;height:100%}
   #settings-overlay input[type=range]{height:4px;background:#1a2a30;border-radius:2px}
   #settings-overlay input[type=range]::-webkit-slider-thumb{width:12px;height:12px;background:#6fe3d2;border-radius:50%;cursor:pointer}
   #settings-overlay input[type=range]::-moz-range-thumb{width:12px;height:12px;background:#6fe3d2;border-radius:50%;cursor:pointer;border:none}
@@ -21,6 +26,8 @@
 <div id="err"></div>
 <div id="probe"></div>
 <div id="load">PERFURANDO&nbsp;CROSTA</div>
+<div id="crt-overlay"></div>
+<div id="xhair"><svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="9" fill="none" stroke="#6fe3d2" stroke-width="1" opacity="0.55"/><line x1="14" y1="2" x2="14" y2="9" stroke="#6fe3d2" stroke-width="1.5"/><line x1="14" y1="19" x2="14" y2="26" stroke="#6fe3d2" stroke-width="1.5"/><line x1="2" y1="14" x2="9" y2="14" stroke="#6fe3d2" stroke-width="1.5"/><line x1="19" y1="14" x2="26" y2="14" stroke="#6fe3d2" stroke-width="1.5"/><circle cx="14" cy="14" r="1.5" fill="#6fe3d2"/></svg></div>
 <div id="settings-overlay" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(2,4,8,0.78);z-index:50;font:13px/1.5 Consolas,monospace">
   <div style="background:#0a0f16;border:1px solid #1f4654;border-radius:8px;padding:22px 26px;min-width:300px;color:#cfe8f2;box-shadow:0 0 40px rgba(0,200,200,0.12)">
     <div style="font:bold 15px Consolas,monospace;color:#6fe3d2;letter-spacing:.18em;margin-bottom:14px">CONFIGURAÇÕES</div>
@@ -33,7 +40,11 @@
       <input id="reduce-flash-toggle" type="checkbox" style="accent-color:#6fe3d2">
       <span>Reduzir flashes / motion</span>
     </label>
-    <div style="color:#6f8ba0;font-size:11px;margin-top:6px;line-height:1.4">Reduz screen shake, vinheta de dano e flashes brancos. Mantém hitstop e slowmo.</div>
+    <label style="display:flex;align-items:center;gap:8px;margin:10px 0 4px;cursor:pointer;color:#cfe8f2">
+      <input id="crt-toggle" type="checkbox" style="accent-color:#6fe3d2">
+      <span>Filtro CRT (scanlines)</span>
+    </label>
+    <div style="color:#6f8ba0;font-size:11px;margin-top:6px;line-height:1.4">Reduz screen shake, vinheta de dano e flashes brancos. CRT aplica overlay de scanlines retrô.</div>
     <div style="border-top:1px solid #1f4654;margin-top:14px;padding-top:10px">
       <div style="display:flex;justify-content:space-between;color:#6f8ba0;font-size:11px">
         <span>P pausa</span><span>O fecha</span><span>M muta</span>
@@ -574,7 +585,7 @@ function sizzleFx(x,y){
 }
 
 /* ---------------- entidades ---------------- */
-const P={x:0,y:0,vx:0,vy:0,hp:100,bombs:3,alive:true,aim:0,thr:0,hurtCd:0,inLiq:0,deathCause:''};
+const P={x:0,y:0,vx:0,vy:0,hp:100,bombs:3,alive:true,aim:0,thr:0,hurtCd:0,inLiq:0,deathCause:'',stamina:100,boostActive:false,boostTimer:0,lastKeyTimes:{}};
 let worms=[], bombs=[], pickups=[], texts=[], lights=[];
 let coreTaken=false, coreGone=false, tideY=1e9, tideOn=false;
 let wormTimer=600;
@@ -588,6 +599,11 @@ resetStats();
 let gameMode = Q.get('mode') || 'classic';     // classic | fossa | hardcore | daily
 let reduceFlash = false;
 let userVolume = 0.5;
+let crtEnabled = false;
+try{
+  crtEnabled = localStorage.getItem('nucleo_crt')==='1';
+  if(crtEnabled) document.body.classList.add('crt-on');
+}catch(e){}
 try{
   reduceFlash = localStorage.getItem('nucleo_reduce_flash')==='1';
   const v = parseFloat(localStorage.getItem('nucleo_volume'));
@@ -632,10 +648,22 @@ function stepPlayer(){
   if(!P.alive) return;
   if(Q.get('freeze')==='1'){ P.vx=P.vy=0; return; }
   const up=keys.KeyW||keys.ArrowUp, dn=keys.KeyS||keys.ArrowDown, lf=keys.KeyA||keys.ArrowLeft, rt=keys.KeyD||keys.ArrowRight;
-  const boost=coreTaken?1.45:1;
+  // boost pós-núcleo (mantido)
+  const coreBoost=coreTaken?1.45:1;
+  // estamina/boost por duplo clique: 2x por ~1.2s, drena 40/s, regen 18/s
+  if(P.boostTimer>0){ P.boostTimer-=1/60; if(P.boostTimer<=0){ P.boostActive=false; P.boostTimer=0; } }
+  if(P.boostActive){
+    P.stamina = Math.max(0, P.stamina - 40/60);
+    if(P.stamina<=0){ P.boostActive=false; P.boostTimer=0; }
+  } else {
+    P.stamina = Math.min(100, P.stamina + 18/60);
+  }
+  const staminaBoost = P.boostActive ? 2.0 : 1.0;
+  const boost = coreBoost * staminaBoost;
+  // V2: velocidade base reduzida (~25%)
   let ax=0,ay=0;
-  if(lf)ax-=0.3; if(rt)ax+=0.3;
-  if(up)ay-=0.42; if(dn)ay+=0.26;
+  if(lf)ax-=0.22; if(rt)ax+=0.22;
+  if(up)ay-=0.32; if(dn)ay+=0.20;
   ax*=boost; ay*=boost;
   P.thr=lerp(P.thr,(ax||ay)?1:0,0.2);
   // meio
@@ -657,9 +685,16 @@ function stepPlayer(){
   if(tideOn&&P.y>tideY-3) hurt(3,'derretido por magma');
   P.vx=(P.vx+ax)*drag;
   P.vy=(P.vy+ay+g)*drag;
-  const mv=2.7*boost;
+  // V2: velocidade base reduzida
+  const mv=2.0*boost;
   const sp=Math.hypot(P.vx,P.vy);
   if(sp>mv){ P.vx*=mv/sp; P.vy*=mv/sp; }
+  // V2: trail do drone quando rápido
+  if(sp>1.5 && Math.random()<0.6){
+    spawnPart(P.x+(Math.random()-0.5)*2,P.y+(Math.random()-0.5)*2,
+      -P.vx*0.15+(Math.random()-0.5)*0.2, -P.vy*0.15+(Math.random()-0.5)*0.2,
+      140,180,210,-1,12+Math.random()*8,true);
+  }
   moveBody();
   // enterrado: empurra para fora
   if(isSolidAt(P.x|0,P.y|0)){
@@ -667,9 +702,15 @@ function stepPlayer(){
   }
   P.aim=Math.atan2(mouse.wy-P.y,mouse.wx-P.x);
   if(P.hurtCd>0)P.hurtCd--;
-  // exaustores
+  // exaustores (laranja normal, azul quando em boost)
   if(P.thr>0.3&&Math.random()<0.5){
-    spawnPart(P.x-Math.cos(P.aim)*0+(Math.random()-0.5)*2,P.y+3,(Math.random()-0.5)*0.6-ax*0.7,0.8+Math.random()*0.7,255,190,110,-1,10+Math.random()*12,true);
+    if(P.boostActive){
+      // chamas azuis intensas em boost
+      spawnPart(P.x+(Math.random()-0.5)*2,P.y+3,(Math.random()-0.5)*0.6-ax*0.7,0.9+Math.random()*0.9,150,210,255,-1,14+Math.random()*14,true);
+      if(Math.random()<0.4) spawnPart(P.x+(Math.random()-0.5)*2,P.y+3,(Math.random()-0.5)*0.4-ax*0.4,0.6+Math.random()*0.6,255,255,255,-1,8+Math.random()*6,true);
+    } else {
+      spawnPart(P.x+(Math.random()-0.5)*2,P.y+3,(Math.random()-0.5)*0.6-ax*0.7,0.8+Math.random()*0.7,255,190,110,-1,10+Math.random()*12,true);
+    }
   }
   if(P.hp<32&&Math.random()<0.12) spawnPart(P.x,P.y-2,(Math.random()-0.5)*0.4,-0.5,90,90,95,-1,40,true);
   // reparo na plataforma
@@ -794,6 +835,7 @@ function spawnWorm(){
 }
 function hurtWorm(w,d){
   w.hp-=d;
+  w.hitFlash = 8;  // V10: flash branco de 8 frames ao tomar dano
   if(w.hp<=0&&!w.dead){
     w.dead=true;
     stats.wormsKilled++;
@@ -1060,8 +1102,9 @@ addEventListener('resize',resize);
 function skyColor(wx,wy){
   const t=clamp(wy/(surf[wx]||120),0,1);
   const r=lerp(14,148,t*t), g=lerp(16,84,t*t), b=lerp(38,72,t);
-  // estrelas
+  // V4: parallax — estrelas usam coordenada de câmera deslocada
   if(t<0.45&&hash2(wx,wy,77)>0.9965){
+    // cintilação levemente deslocada pela câmera (parallax sutil)
     const tw=0.6+0.4*Math.sin(simFrames*0.05+wx*7);
     return [r+200*tw,g+200*tw,b+180*tw];
   }
@@ -1092,12 +1135,19 @@ function renderWorld(){
       if(tideOn&&wy>tideY&&m!==MET) m=LAVA;
       let r,g,b;
       if(m===E&&wy<surf[wx]){
+        // V4: parallax em estrelas — deslocamento sutil conforme câmera X
         const c=skyColor(wx,wy); r=c[0];g=c[1];b=c[2];
       } else {
         const c=PAL[m], sh=(shade[row+wx]-128)/128, v=VARI[m];
         r=c[0]+sh*v; g=c[1]+sh*v; b=c[2]+sh*v;
         if(m===WATER){ const w2=Math.sin(wx*0.35+t*0.1)+Math.sin(wy*0.29-t*0.07+wx*0.11); r+=w2*6;g+=w2*8;b+=w2*12; }
-        else if(m===LAVA){ const w2=0.5+0.5*Math.sin(wx*0.17+wy*0.13+t*0.06+sh*3); r=lerp(r,255,w2*0.5);g=lerp(g,196,w2*0.5);b=lerp(b,64,w2*0.4); }
+        else if(m===LAVA){
+          // V5: pulsação mais lenta + flicker esporádico forte
+          const slow = 0.5+0.5*Math.sin(wx*0.11+wy*0.09+t*0.035+sh*3);
+          const flick = hash2(wx,wy,t>>1)>0.97 ? 1.0 : 0;
+          const w2 = Math.max(slow, flick);
+          r=lerp(r,255,w2*0.55);g=lerp(g,200,w2*0.5);b=lerp(b,72,w2*0.4);
+        }
         else if(m===FIRE){ const w2=hash2(wx,wy,t); r=255;g=120+w2*120;b=30+w2*60; }
         else if(m===ACID){ const w2=Math.sin(wx*0.5+t*0.15+wy); g+=w2*18; }
         else if(m===CRY){ const w2=hash2(wx,wy,t>>3); if(w2>0.93){r+=120;g+=120;b+=120;} }
@@ -1158,11 +1208,14 @@ function drawEntities(){
   }
   // vermes
   for(const w of worms){
+    if(w.hitFlash>0) w.hitFlash--;
     for(let s=w.segs.length-1;s>=0;s--){
       const sg=w.segs[s], x=w2sx(sg.x), y=w2sy(sg.y);
       if(x<-30||x>cssW+30||y<-30||y>cssH+30)continue;
       const rr=(3.6-s*0.2)*S/4*2;
-      ctx.fillStyle=s===0?'#3a1018':'#4a2330';
+      // V10: flash branco quando hitFlash > 0
+      const baseColor = w.hitFlash>0 ? '#ffffff' : (s===0?'#3a1018':'#4a2330');
+      ctx.fillStyle=baseColor;
       ctx.beginPath(); ctx.arc(x,y,Math.max(1.5,rr),0,7); ctx.fill();
       if(s>0&&s<w.segs.length-1&&(s&1)){
         ctx.save();ctx.globalCompositeOperation='lighter';
@@ -1198,7 +1251,8 @@ function drawEntities(){
       ctx.globalCompositeOperation='lighter';
       const a=clamp(p.life/40,0.05,0.8);
       ctx.fillStyle='rgba('+(p.r|0)+','+(p.g|0)+','+(p.b|0)+','+a.toFixed(2)+')';
-      ctx.fillRect(x-1.5,y-1.5,3,3);
+      // V3: partículas glow redondas
+      ctx.beginPath(); ctx.arc(x,y,1.8,0,7); ctx.fill();
     } else {
       ctx.globalCompositeOperation='source-over';
       ctx.fillStyle='rgb('+(p.r|0)+','+(p.g|0)+','+(p.b|0)+')';
@@ -1247,17 +1301,23 @@ function drawDrone(){
   if(state==='title')return;
   const x=w2sx(P.x), y=w2sy(P.y), S=SCALE;
   ctx.save();
-  ctx.translate(x,y);
+  // V7: bob vertical sutil sincronizado com thrusters
+  const bob = P.thr>0.2 ? Math.sin(simFrames*0.3)*0.6 : 0;
+  ctx.translate(x,y+bob);
   const tilt=clamp(P.vx*0.06,-0.22,0.22);
   ctx.rotate(tilt);
   const sc=S/4;
   ctx.scale(sc,sc);
-  // chamas
+  // chamas (azul/rosa em boost, laranja normal)
   if(P.thr>0.25){
     ctx.save(); ctx.globalCompositeOperation='lighter';
-    const fl=6+Math.random()*6;
+    const fl=6+Math.random()*6 + (P.boostActive?4:0);
     const grd=ctx.createLinearGradient(0,10,0,10+fl);
-    grd.addColorStop(0,'rgba(255,240,200,0.95)'); grd.addColorStop(0.4,'rgba(255,150,50,0.6)'); grd.addColorStop(1,'rgba(255,60,10,0)');
+    if(P.boostActive){
+      grd.addColorStop(0,'rgba(220,240,255,0.95)'); grd.addColorStop(0.4,'rgba(120,200,255,0.75)'); grd.addColorStop(1,'rgba(80,120,255,0)');
+    } else {
+      grd.addColorStop(0,'rgba(255,240,200,0.95)'); grd.addColorStop(0.4,'rgba(255,150,50,0.6)'); grd.addColorStop(1,'rgba(255,60,10,0)');
+    }
     ctx.fillStyle=grd;
     ctx.beginPath(); ctx.moveTo(-4,9); ctx.lineTo(4,9); ctx.lineTo(0,10+fl); ctx.closePath(); ctx.fill();
     ctx.restore();
@@ -1308,7 +1368,7 @@ function drawHud(){
   ctx.textAlign='left'; ctx.textBaseline='top';
   // painel
   ctx.fillStyle='rgba(6,9,14,0.55)';
-  roundRect(pad-6,pad-6,212,86,6); ctx.fill();
+  roundRect(pad-6,pad-6,212,128,6); ctx.fill();
   // casco
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='#9fb4c8'; ctx.fillText('CASCO',pad,pad);
@@ -1318,20 +1378,28 @@ function drawHud(){
   ctx.fillStyle=hpc; ctx.fillRect(pad,pad+12,hpw*hpf,9);
   if(P.hp<30&&(simFrames>>4)&1){ ctx.strokeStyle='#ff5a4e'; ctx.strokeRect(pad-1,pad+11,hpw+2,11); }
   ctx.fillStyle='#dfe9f2'; ctx.fillText((P.hp|0)+'%',pad+hpw+8,pad+12);
+  // estamina (stamina)
+  ctx.fillStyle='#9fb4c8'; ctx.fillText('ESTAMINA',pad,pad+44);
+  const stf=clamp(P.stamina/100,0,1);
+  ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fillRect(pad,pad+56,hpw,7);
+  const stc = P.boostActive ? '#7fb4ff' : stf>0.3 ? '#9ad9ff' : '#5a6e85';
+  ctx.fillStyle=stc; ctx.fillRect(pad,pad+56,hpw*stf,7);
+  if(P.boostActive && (simFrames>>2)&1){ ctx.strokeStyle='#a0c8ff'; ctx.lineWidth=1; ctx.strokeRect(pad-1,pad+55,hpw+2,9); }
+  ctx.fillStyle='#dfe9f2'; ctx.fillText((P.stamina|0)+'%',pad+hpw+8,pad+55);
   // bombas
-  ctx.fillStyle='#9fb4c8'; ctx.fillText('BOMBAS',pad,pad+28);
+  ctx.fillStyle='#9fb4c8'; ctx.fillText('BOMBAS',pad,pad+68);
   for(let k=0;k<P.bombs;k++){
-    ctx.fillStyle='#2c313a'; ctx.beginPath(); ctx.arc(pad+6+k*14,pad+45,4.4,0,7); ctx.fill();
-    ctx.fillStyle='#ffd27f'; ctx.fillRect(pad+5+k*14,pad+38,2,3);
+    ctx.fillStyle='#2c313a'; ctx.beginPath(); ctx.arc(pad+6+k*14,pad+85,4.4,0,7); ctx.fill();
+    ctx.fillStyle='#ffd27f'; ctx.fillRect(pad+5+k*14,pad+78,2,3);
   }
   // cristais
-  ctx.fillStyle='#9fb4c8'; ctx.fillText('CRISTAIS',pad,pad+56);
+  ctx.fillStyle='#9fb4c8'; ctx.fillText('CRISTAIS',pad,pad+96);
   ctx.fillStyle='#8ff5e8';
   ctx.beginPath();
-  const cx2=pad+8, cy2=pad+74;
+  const cx2=pad+8, cy2=pad+114;
   ctx.moveTo(cx2,cy2-5);ctx.lineTo(cx2+4,cy2);ctx.lineTo(cx2,cy2+5);ctx.lineTo(cx2-4,cy2);ctx.closePath();ctx.fill();
   ctx.font='bold 13px Consolas,monospace';
-  ctx.fillText(String(stats.crystals),pad+18,pad+67);
+  ctx.fillText(String(stats.crystals),pad+18,pad+107);
   // profundidade (régua à direita)
   const rx=cssW-26, ry0=70, ry1=cssH-70;
   ctx.strokeStyle='rgba(160,190,210,0.35)'; ctx.lineWidth=1;
@@ -1479,11 +1547,17 @@ function drawMsgs(){
     ctx.globalAlpha=a;
     const col=m2.who==='ALERTA'?'#ff6a50':m2.who==='BASE'?'#8af2ff':'#ffd27f';
     const txt='« '+m2.who+' »  '+m2.text.slice(0,Math.ceil(m2.shown));
-    ctx.fillStyle='rgba(5,8,12,0.6)';
+    // V8: fundo com borda glow para legibilidade
+    ctx.fillStyle='rgba(5,8,12,0.78)';
     const tw=ctx.measureText(txt).width;
     ctx.fillRect(12,y-3,tw+14,17);
+    // glow ao redor do texto
+    ctx.shadowColor=col; ctx.shadowBlur=10;
     ctx.fillStyle=col;
     ctx.fillText(txt,18,y);
+    // segundo passe para reforçar glow
+    ctx.fillText(txt,18,y);
+    ctx.shadowBlur=0;
     y-=20;
   }
   ctx.globalAlpha=1;
@@ -1516,7 +1590,8 @@ function drawScreens(){
     const lines=[
       'WASD / SETAS — propulsores        MOUSE — mirar',
       'BOTÃO ESQ — laser de mineração    ESPAÇO ou BOTÃO DIR (segurar) — bomba sísmica',
-      'M — som    P — pausa    R — reiniciar (Shift+R: mesma semente)'
+      'DUPLO CLIQUE numa tecla — BOOST 2x (consome estamina)',
+      'M — som    P — pausa    O — config    R — reiniciar (Shift+R: mesma semente)'
     ];
     lines.forEach((l,i)=>ctx.fillText(l,cssW/2,cy+150+i*18));
     const best=loadBest();
@@ -1653,11 +1728,17 @@ function loadBestStats(){
 
 /* vinheta / flashes */
 function drawPost(){
-  // vinheta
-  const depth=clamp((P.y-padY)/900,0,1);
-  let g=ctx.createRadialGradient(cssW/2,cssH/2,Math.min(cssW,cssH)*0.36,cssW/2,cssH/2,Math.max(cssW,cssH)*0.72);
+  // V6: vinheta vermelha mais intensa a partir de 600m (era 900m)
+  const depth=clamp((P.y-padY)/600,0,1);
+  let g=ctx.createRadialGradient(cssW/2,cssH/2,Math.min(cssW,cssH)*0.30,cssW/2,cssH/2,Math.max(cssW,cssH)*0.72);
   g.addColorStop(0,'rgba(0,0,0,0)');
-  g.addColorStop(1,'rgba(0,0,8,'+(0.45+depth*0.2).toFixed(2)+')');
+  // mix vermelho intenso com preto conforme profundidade
+  const redR = Math.floor(depth*70);
+  const redG = Math.floor(depth*6);
+  const redB = Math.floor(8 + (1-depth)*8);
+  const alpha = 0.40 + depth*0.40;
+  g.addColorStop(0.55,'rgba('+redR+','+redG+','+redB+','+(alpha*0.4).toFixed(2)+')');
+  g.addColorStop(1,'rgba('+redR+','+redG+','+redB+','+alpha.toFixed(2)+')');
   ctx.fillStyle=g; ctx.fillRect(0,0,cssW,cssH);
   // dano
   if(dmgFlash>0.01){
@@ -1773,6 +1854,15 @@ function bindSettingsOverlay(){
     toggle.checked = reduceFlash;
     toggle.addEventListener('change',()=>{
       setReduceFlash(toggle.checked);
+    });
+  }
+  const crtTg=document.getElementById('crt-toggle');
+  if(crtTg){
+    crtTg.checked = crtEnabled;
+    crtTg.addEventListener('change',()=>{
+      crtEnabled = crtTg.checked;
+      try{ localStorage.setItem('nucleo_crt', crtEnabled?'1':'0'); }catch(e){}
+      document.body.classList.toggle('crt-on', crtEnabled);
     });
   }
   if(close){
@@ -1915,6 +2005,21 @@ addEventListener('keydown',e=>{
   if(e.repeat)return;
   keys[e.code]=true;
   if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
+  // Boost por duplo clique em tecla de movimento (consome estamina)
+  if(state==='play' && P.alive && P.stamina>15){
+    const moveKeys=['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowLeft','ArrowDown','ArrowRight'];
+    if(moveKeys.includes(e.code)){
+      const now=performance.now();
+      const last=P.lastKeyTimes[e.code]||0;
+      if(now-last<280){
+        // duplo clique detectado: ativa boost
+        P.boostActive=true;
+        P.boostTimer=1.2;
+        if(!MS.boostUsed){ MS.boostUsed=true; say('DRONE','Propulsores sobrecarregados — duplo clique ativa boost (consome estamina).'); }
+      }
+      P.lastKeyTimes[e.code]=now;
+    }
+  }
   if(e.code==='Enter'&&state==='title') startRun();
   else if(e.code==='Space'&&state==='play'&&!paused) throwBomb(2.6);
   else if(e.code==='KeyM'){ audioInit(); setMute(!AU.muted); }
@@ -1941,7 +2046,11 @@ addEventListener('keydown',e=>{
   }
 });
 addEventListener('keyup',e=>{ keys[e.code]=false; });
-cv.addEventListener('mousemove',e=>{ mouse.x=e.clientX; mouse.y=e.clientY; });
+cv.addEventListener('mousemove',e=>{
+  mouse.x=e.clientX; mouse.y=e.clientY;
+  const xh=document.getElementById('xhair');
+  if(xh){ xh.style.left=e.clientX+'px'; xh.style.top=e.clientY+'px'; }
+});
 cv.addEventListener('mousedown',e=>{
   audioInit();
   if(state==='title'){ startRun(); return; }
@@ -2001,6 +2110,7 @@ function restart(sameSeed){
   // posiciona player
   P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=100; P.bombs=3; P.alive=true; P.deathCause='';
   P.thr=0; P.hurtCd=0; P.inLiq=0; P.aim=0;
+  P.stamina=100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
   camX=padX; camY=padY-30;
   state='play';
   // recria timeouts de tutorial (cancellation implícito por state check)
@@ -2038,6 +2148,7 @@ function startRun(mode){
   state='play'; paused=false;
   P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=100; P.bombs=3; P.alive=true; P.deathCause='';
   P.thr=0; P.hurtCd=0; P.inLiq=0; P.aim=0;
+  P.stamina=100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
   resetStats();
   msgs=[];
   lastZone='';
