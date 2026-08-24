@@ -80,7 +80,7 @@ function syncProbe(){ document.getElementById('probe').textContent = 'PROBE'+JSO
 
 const Q = new URLSearchParams(location.search);
 let SEED = Q.get('seed') ? (parseInt(Q.get('seed'),10)>>>0) : ((Math.random()*1e9)>>>0);
-const GOD  = Q.get('god')==='1';
+let GOD = Q.get("god")==="1";
 
 /* ---------------- utils ---------------- */
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
@@ -612,6 +612,292 @@ try{
 }catch(e){}
 // estado do menu principal (studio-grade)
 let menuSelectedMode = Q.get('mode') || 'classic';   // modo selecionado no menu (pode diferir de gameMode até iniciar)
+// ===== console de desenvolvedor (') + mod menu =====
+let consoleOpen = false;
+let consoleInput = '';
+let consoleCursorBlink = 0;
+let consoleHistory = [];
+let consoleHistoryIdx = -1;
+let consoleLog = [];
+const CONSOLE_MAX_LOG = 8;
+function consoleLogPush(msg, color){
+  consoleLog.push({msg, color: color || '#cfe8f2', life: 480});
+  if(consoleLog.length > CONSOLE_MAX_LOG) consoleLog.shift();
+}
+function consoleToggle(){
+  consoleOpen = !consoleOpen;
+  consoleInput = '';
+  consoleHistoryIdx = -1;
+  if(consoleOpen){
+    // pausa o jogo enquanto console está aberto
+    if(state==='play' && !paused){ paused=true; if(AU.ctx) AU.ctx.suspend(); }
+  } else {
+    // despausa se foi pausado pelo console
+    if(state==='play' && paused){ paused=false; if(AU.ctx) AU.ctx.resume(); }
+  }
+}
+function consoleExecute(raw){
+  const cmd = (raw||'').trim();
+  if(!cmd) return;
+  consoleHistory.push(cmd);
+  consoleLogPush('> '+cmd, '#8af2ff');
+  const parts = cmd.split(/\s+/);
+  const verb = parts[0].toLowerCase();
+  const arg = parts.slice(1).join(' ');
+  try{
+    switch(verb){
+      case 'modmenu':
+        modMenuOpen = !modMenuOpen;
+        consoleLogPush(modMenuOpen ? 'MOD MENU: ABERTO' : 'MOD MENU: FECHADO', modMenuOpen?'#6fe3d2':'#9fb4c8');
+        break;
+      case 'help':
+        consoleLogPush('comandos: modmenu, god [0|1], hp [n], bombs [n], crystals [n], stamina [n], depth [n], seed [n], mode [classic|fossa|hardcore|daily], spawn worm, spawn crystal [n], explode, clear, kill worms, tpd [x] [y], list', '#7da3b8');
+        break;
+      case 'god':
+        GOD = arg ? (arg==='1'||arg==='true') : !GOD;
+        consoleLogPush('GOD MODE: '+(GOD?'ON':'OFF'), GOD?'#ff6a50':'#9fb4c8');
+        break;
+      case 'hp':
+        if(arg){ P.hp = clamp(parseFloat(arg),0,100); consoleLogPush('HP = '+P.hp, '#69e07c'); }
+        else consoleLogPush('HP atual: '+P.hp, '#9fb4c8');
+        break;
+      case 'bombs':
+        if(arg){ P.bombs = clamp(parseInt(arg,10),0,99); consoleLogPush('BOMBAS = '+P.bombs, '#ffd27f'); }
+        else consoleLogPush('BOMBAS atual: '+P.bombs, '#9fb4c8');
+        break;
+      case 'crystals':
+        if(arg){ stats.crystals = Math.max(0,parseInt(arg,10)); consoleLogPush('CRISTAIS = '+stats.crystals, '#8ff5e8'); }
+        else consoleLogPush('CRISTAIS atual: '+stats.crystals, '#9fb4c8');
+        break;
+      case 'stamina':
+        if(arg){ P.stamina = clamp(parseFloat(arg),0,100); consoleLogPush('ESTAMINA = '+P.stamina, '#9ad9ff'); }
+        else consoleLogPush('ESTAMINA atual: '+P.stamina, '#9fb4c8');
+        break;
+      case 'depth':
+        if(arg && state==='play'){
+          const d = parseInt(arg,10);
+          P.y = padY + d; P.x = padX + (Math.random()-0.5)*40;
+          digCircle(P.x,P.y,9,{debris:0});
+          for(let dy=-8;dy<=8;dy++)for(let dx=-8;dx<=8;dx++){
+            if(dx*dx+dy*dy<=64){ const i=(P.x|0)+dx+((P.y|0)+dy)*W; if(grid[i]!==MET&&STATE[grid[i]]!==0&&HARD[grid[i]]){grid[i]=E;aux[i]=0;} }
+          }
+          wakeArea(P.x|0,P.y|0,12);
+          camX=P.x; camY=P.y;
+          consoleLogPush('TELEPORT para profundidade '+d+'m', '#ff6a50');
+        } else consoleLogPush('profundidade atual: '+Math.max(0,(P.y-padY)|0)+'m', '#9fb4c8');
+        break;
+      case 'seed':
+        if(arg){ SEED = parseInt(arg,10)>>>0; consoleLogPush('SEED definida para '+SEED+' (reinicie com R para aplicar)', '#ffae4a'); }
+        else consoleLogPush('SEED atual: '+SEED, '#9fb4c8');
+        break;
+      case 'mode':
+        if(arg && MODE_INFO[arg]){ menuSelectedMode = arg; consoleLogPush('MODO selecionado: '+arg+' (inicie com ENTER)', '#6fe3d2'); }
+        else consoleLogPush('modos: classic, fossa, hardcore, daily', '#9fb4c8');
+        break;
+      case 'spawn':
+        if(arg.startsWith('worm')){ spawnWorm(); consoleLogPush('verme gerado', '#ff6a50'); }
+        else if(arg.startsWith('crystal')){
+          const n = parseInt(arg.split(/\s+/)[1]||'1',10);
+          for(let k=0;k<n;k++){
+            const x=P.x+(Math.random()-0.5)*40|0, y=P.y+(Math.random()-0.5)*40|0;
+            pickups.push({type:1,x,y,vx:0,vy:-1.5,t:0});
+          }
+          consoleLogPush(n+' cristal(is) gerado(s)', '#8ff5e8');
+        }
+        else consoleLogPush('uso: spawn worm | spawn crystal [n]', '#9fb4c8');
+        break;
+      case 'explode':
+        explode(P.x, P.y, 19);
+        consoleLogPush('explosão gerada em ('+(P.x|0)+','+(P.y|0)+')', '#ff6a50');
+        break;
+      case 'clear':
+        consoleLog = [];
+        break;
+      case 'kill':
+        if(arg==='worms'){
+          const n = worms.length;
+          for(const w of worms) hurtWorm(w, 9999);
+          consoleLogPush(n+' verme(s) morto(s)', '#ff6a50');
+        } else consoleLogPush('uso: kill worms', '#9fb4c8');
+        break;
+      case 'tpd':
+        // teleport depth
+        if(arg && state==='play'){
+          const d = parseInt(arg,10);
+          P.y = padY + d;
+          digCircle(P.x,P.y,9,{debris:0});
+          camX=P.x; camY=P.y;
+          consoleLogPush('teleport para '+d+'m', '#ff6a50');
+        }
+        break;
+      case 'list':
+        consoleLogPush('god '+GOD+' | hp '+P.hp+' | bombs '+P.bombs+' | crystals '+stats.crystals+' | stamina '+P.stamina.toFixed(0)+' | depth '+Math.max(0,(P.y-padY)|0)+' | seed '+SEED+' | mode '+gameMode, '#7da3b8');
+        break;
+      default:
+        consoleLogPush('comando desconhecido: '+verb+' (digite help)', '#ff6a50');
+    }
+  }catch(err){
+    consoleLogPush('erro: '+err.message, '#ff6a50');
+  }
+}
+// mod menu (overlay clicável)
+let modMenuOpen = false;
+let modMenuToggles = {
+  god: false,
+  infiniteStamina: false,
+  infiniteBombs: false,
+  oneHitKill: false,
+  noClip: false,
+  fastDig: false,
+};
+let modMenuHovered = null;
+let modMenuRects = [];
+function applyMods(){
+  // aplica mods a cada frame
+  if(modMenuToggles.god){ GOD = true; P.hp = 100; }
+  if(modMenuToggles.infiniteStamina){ P.stamina = 100; P.boostTimer = Math.max(P.boostTimer, 0.1); }
+  if(modMenuToggles.infiniteBombs){ P.bombs = 9; }
+  // noClip: drona atravessa paredes (desabilita moveBody collisions)
+  // fastDig: aumenta raio do laser (aplicado em stepBeam)
+  // oneHitKill: worms morrem em 1 hit (aplicado em hurtWorm)
+}
+function drawConsole(){
+  if(!consoleOpen) return;
+  // painel no topo
+  const h = Math.min(220, cssH*0.35);
+  let g = ctx.createLinearGradient(0,0,0,h);
+  g.addColorStop(0,'rgba(2,4,8,0.95)');
+  g.addColorStop(1,'rgba(8,12,20,0.88)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,cssW,h);
+  // borda inferior
+  ctx.strokeStyle = 'rgba(111,227,210,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,h); ctx.lineTo(cssW,h); ctx.stroke();
+  // header
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle = '#6fe3d2';
+  ctx.fillText('▮ DEV CONSOLE  ·  digite "help" para comandos  ·  [ESC] fecha', 12, 8);
+  // histórico
+  ctx.font='12px Consolas,monospace';
+  let y = 28;
+  for(const entry of consoleLog){
+    const alpha = clamp(entry.life/120, 0.4, 1);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = entry.color;
+    // quebra de linha se necessário
+    const lines = wrapText(entry.msg, cssW-32);
+    for(const ln of lines){
+      ctx.fillText(ln, 12, y);
+      y += 16;
+      if(y > h-30) break;
+    }
+    entry.life--;
+    if(y > h-30) break;
+  }
+  ctx.globalAlpha = 1;
+  // prompt
+  const promptY = h - 22;
+  ctx.fillStyle = '#6fe3d2';
+  ctx.font='bold 13px Consolas,monospace';
+  ctx.fillText('>', 12, promptY);
+  // cursor piscante
+  consoleCursorBlink = (consoleCursorBlink+1) % 60;
+  const showCursor = consoleCursorBlink < 30;
+  ctx.fillStyle = '#cfe8f2';
+  ctx.font='13px Consolas,monospace';
+  ctx.fillText(consoleInput + (showCursor?'_':''), 28, promptY);
+  ctx.textBaseline='alphabetic';
+}
+function wrapText(txt, maxW){
+  // quebra simples por palavra
+  const words = txt.split(' ');
+  const lines = [];
+  let line = '';
+  for(const w of words){
+    const test = line + (line?' ':'') + w;
+    if(ctx.measureText(test).width > maxW){
+      if(line) lines.push(line);
+      line = w;
+    } else line = test;
+  }
+  if(line) lines.push(line);
+  return lines;
+}
+function drawModMenu(){
+  if(!modMenuOpen) return;
+  // overlay semi-transparente
+  ctx.fillStyle='rgba(2,4,8,0.6)';
+  ctx.fillRect(0,0,cssW,cssH);
+  // painel central
+  const pw = Math.min(440, cssW-80);
+  const ph = 410;
+  const px = (cssW-pw)/2;
+  const py = (cssH-ph)/2;
+  // fundo
+  let g=ctx.createLinearGradient(px,py,px,py+ph);
+  g.addColorStop(0,'rgba(15,30,38,0.96)');
+  g.addColorStop(1,'rgba(8,16,22,0.96)');
+  ctx.fillStyle=g;
+  roundRect(px,py,pw,ph,8); ctx.fill();
+  ctx.strokeStyle='#6fe3d2'; ctx.lineWidth=1.5;
+  roundRect(px,py,pw,ph,8); ctx.stroke();
+  // header
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold 16px Consolas,monospace';
+  ctx.fillStyle='#6fe3d2';
+  ctx.shadowColor='#6fe3d2'; ctx.shadowBlur=10;
+  ctx.fillText('▮ MOD MENU', px+pw/2, py+16);
+  ctx.shadowBlur=0;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('feche com [\'] ou clique fora', px+pw/2, py+38);
+  // toggles
+  modMenuRects = [];
+  const toggles = [
+    {key:'god', label:'GOD MODE', desc:'invencível + HP travado em 100'},
+    {key:'infiniteStamina', label:'ESTAMINA INFINITA', desc:'boost permanente, sem dreno'},
+    {key:'infiniteBombs', label:'BOMBAS INFINITAS', desc:'sempre 9 bombas'},
+    {key:'oneHitKill', label:'ONE-HIT KILL', desc:'vermes morrem em 1 hit'},
+    {key:'noClip', label:'NO-CLIP', desc:'atravessa paredes'},
+    {key:'fastDig', label:'LASER AMPLIADO', desc:'raio do laser 3x maior'},
+  ];
+  let ty = py + 64;
+  const rowH = 50;
+  for(const t of toggles){
+    const on = modMenuToggles[t.key];
+    const hov = modMenuHovered === t.key;
+    // fundo do toggle
+    ctx.fillStyle = on ? 'rgba(111,227,210,0.18)' : (hov?'rgba(111,227,210,0.08)':'rgba(20,30,40,0.4)');
+    roundRect(px+20, ty, pw-40, rowH-8, 4); ctx.fill();
+    ctx.strokeStyle = on ? '#6fe3d2' : (hov?'rgba(111,227,210,0.4)':'rgba(40,60,72,0.5)');
+    ctx.lineWidth = on ? 1.5 : 1;
+    roundRect(px+20, ty, pw-40, rowH-8, 4); ctx.stroke();
+    // indicador ON/OFF à direita
+    ctx.textAlign='right'; ctx.textBaseline='middle';
+    ctx.font='bold 12px Consolas,monospace';
+    ctx.fillStyle = on ? '#6fe3d2' : '#5d7689';
+    ctx.fillText(on?'ON':'OFF', px+pw-32, ty+(rowH-8)/2);
+    // label e desc à esquerda
+    ctx.textAlign='left';
+    ctx.font='bold 13px Consolas,monospace';
+    ctx.fillStyle = on ? '#eafffb' : '#cfe8f2';
+    ctx.fillText(t.label, px+36, ty+10);
+    ctx.font='10px Consolas,monospace';
+    ctx.fillStyle='rgba(125,163,184,0.7)';
+    ctx.fillText(t.desc, px+36, ty+28);
+    // registrar área clicável
+    modMenuRects.push({key:t.key, x:px+20, y:ty, w:pw-40, h:rowH-8});
+    ty += rowH;
+  }
+  // rodapé
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.5)';
+  ctx.fillText('mods são aplicados em tempo real  ·  persistem apenas nesta sessão', px+pw/2, py+ph-22);
+  ctx.textBaseline='alphabetic';
+}
 let menuHoveredMode = null;                            // modo sob o mouse (null = usar teclado)
 let menuHoveredButton = null;                         // 'play' | 'settings' | null
 const MENU_MODES = [
@@ -671,6 +957,7 @@ function explodeFxOnly(x,y){ addLight(x,y,60,255); }
 function stepPlayer(){
   if(!P.alive) return;
   if(Q.get('freeze')==='1'){ P.vx=P.vy=0; return; }
+  applyMods();  // aplica toggles do mod menu
   const up=keys.KeyW||keys.ArrowUp, dn=keys.KeyS||keys.ArrowDown, lf=keys.KeyA||keys.ArrowLeft, rt=keys.KeyD||keys.ArrowRight;
   // boost pós-núcleo (mantido)
   const coreBoost=coreTaken?1.45:1;
@@ -684,15 +971,15 @@ function stepPlayer(){
   }
   const staminaBoost = P.boostActive ? 2.0 : 1.0;
   const boost = coreBoost * staminaBoost;
-  // V2: velocidade base reduzida (~25%)
+  // V2: velocidade base reduzida pela metade (ax 0.11/0.16/0.10)
   let ax=0,ay=0;
-  if(lf)ax-=0.22; if(rt)ax+=0.22;
-  if(up)ay-=0.32; if(dn)ay+=0.20;
+  if(lf)ax-=0.11; if(rt)ax+=0.11;
+  if(up)ay-=0.16; if(dn)ay+=0.10;
   ax*=boost; ay*=boost;
   P.thr=lerp(P.thr,(ax||ay)?1:0,0.2);
   // meio
   const cm=getMat(P.x|0,P.y|0);
-  let g=0.135, drag=0.987;
+  let g=0.07, drag=0.987;
   P.inLiq=0;
   if(STATE[cm]===2){
     P.inLiq=cm; g=0.03; drag=0.92;
@@ -709,12 +996,12 @@ function stepPlayer(){
   if(tideOn&&P.y>tideY-3) hurt(3,'derretido por magma');
   P.vx=(P.vx+ax)*drag;
   P.vy=(P.vy+ay+g)*drag;
-  // V2: velocidade base reduzida
-  const mv=2.0*boost;
+  // V2: velocidade base reduzida pela metade (mv 1.0)
+  const mv=1.0*boost;
   const sp=Math.hypot(P.vx,P.vy);
   if(sp>mv){ P.vx*=mv/sp; P.vy*=mv/sp; }
-  // V2: trail do drone quando rápido
-  if(sp>1.5 && Math.random()<0.6){
+  // V2: trail do drone quando rápido (threshold ajustado p/ nova velocidade)
+  if(sp>0.8 && Math.random()<0.6){
     spawnPart(P.x+(Math.random()-0.5)*2,P.y+(Math.random()-0.5)*2,
       -P.vx*0.15+(Math.random()-0.5)*0.2, -P.vy*0.15+(Math.random()-0.5)*0.2,
       140,180,210,-1,12+Math.random()*8,true);
@@ -747,6 +1034,12 @@ function stepPlayer(){
   thrSet(P.thr*(0.5+0.5*Math.min(1,sp/2)));
 }
 function moveBody(){
+  // noClip: atravessa paredes
+  if(modMenuToggles.noClip){
+    P.x=clamp(P.x+P.vx,4,W-4);
+    P.y=clamp(P.y+P.vy,4,H-6);
+    return;
+  }
   const hx=2.1,hy=2.7;
   // eixo X
   let nx=P.x+P.vx;
@@ -798,7 +1091,8 @@ function stepBeam(){
     const i=xi+yi*W, m=grid[i];
     if(STATE[m]===1){
       if(m!==MET){
-        const mined=digCircle(bx,by,1.9,{debris:0.25});
+        const digR = modMenuToggles.fastDig ? 5.7 : 1.9;
+        const mined=digCircle(bx,by,digR,{debris:0.25});
         if(mined===0&&Math.random()<0.4) spawnPart(bx,by,(Math.random()-0.5)*2+dx,-Math.random()*1.5,255,220,140,-1,8+Math.random()*10,true);
       }
       beamHit={x:bx,y:by,worm:false};
@@ -858,6 +1152,7 @@ function spawnWorm(){
   }
 }
 function hurtWorm(w,d){
+  if(modMenuToggles.oneHitKill) d = 9999;
   w.hp-=d;
   w.hitFlash = 8;  // V10: flash branco de 8 frames ao tomar dano
   if(w.hp<=0&&!w.dead){
@@ -1908,7 +2203,7 @@ function drawMenuFooter(pad){
   ctx.fillText('CONTROLES', pad, fy);
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(125,163,184,0.75)';
-  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config', pad, fy+16);
+  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config  ·  [\'] console', pad, fy+16);
   // versão (direita)
   ctx.textAlign='right';
   ctx.font='10px Consolas,monospace';
@@ -2306,6 +2601,48 @@ function kickAt(t){
 const keys={};
 const mouse={x:0,y:0,wx:0,wy:0,l:false,r:false,rWas:false};
 addEventListener('keydown',e=>{
+  if(e.repeat && !consoleOpen)return;
+  // ===== CONSOLE: captura teclas quando aberto =====
+  if(consoleOpen){
+    if(e.code==='Escape' || e.code==='Quote'){ consoleToggle(); return; }
+    if(e.code==='Backspace'){ consoleInput = consoleInput.slice(0,-1); return; }
+    if(e.code==='Enter'){
+      const cmd = consoleInput;
+      consoleInput = '';
+      if(cmd.trim()) consoleExecute(cmd);
+      return;
+    }
+    if(e.code==='ArrowUp'){
+      if(consoleHistory.length>0){
+        consoleHistoryIdx = consoleHistoryIdx<0 ? consoleHistory.length-1 : Math.max(0,consoleHistoryIdx-1);
+        consoleInput = consoleHistory[consoleHistoryIdx] || '';
+      }
+      return;
+    }
+    if(e.code==='ArrowDown'){
+      if(consoleHistoryIdx>=0){
+        consoleHistoryIdx = Math.min(consoleHistory.length, consoleHistoryIdx+1);
+        consoleInput = consoleHistoryIdx<consoleHistory.length ? consoleHistory[consoleHistoryIdx] : '';
+      }
+      return;
+    }
+    // captura caractere
+    if(e.key && e.key.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey){
+      consoleInput += e.key;
+    }
+    return;
+  }
+  // tecla ' abre console
+  if(e.code==='Quote' && !e.ctrlKey && !e.altKey && !e.metaKey){
+    e.preventDefault();
+    consoleToggle();
+    return;
+  }
+  // mod menu fecha com ' se estiver aberto
+  if(modMenuOpen && (e.code==='Escape' || e.code==='Quote')){
+    modMenuOpen = false;
+    return;
+  }
   if(e.repeat)return;
   keys[e.code]=true;
   if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
@@ -2369,8 +2706,18 @@ cv.addEventListener('mousemove',e=>{
   mouse.x=e.clientX; mouse.y=e.clientY;
   const xh=document.getElementById('xhair');
   if(xh){ xh.style.left=e.clientX+'px'; xh.style.top=e.clientY+'px'; }
+  // mod menu hover
+  if(modMenuOpen){
+    modMenuHovered = null;
+    for(const r of modMenuRects){
+      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+        modMenuHovered = r.key;
+        break;
+      }
+    }
+  }
   // menu principal: detectar hover sobre modos e botão
-  if(state==='title'){
+  if(state==='title' && !modMenuOpen){
     menuHoveredMode = null;
     menuHoveredButton = null;
     for(const r of menuBtnRects){
@@ -2383,6 +2730,20 @@ cv.addEventListener('mousemove',e=>{
   }
 });
 cv.addEventListener('click',e=>{
+  // mod menu: clicar num toggle
+  if(modMenuOpen){
+    let hit = false;
+    for(const r of modMenuRects){
+      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+        modMenuToggles[r.key] = !modMenuToggles[r.key];
+        consoleLogPush('MOD ' + r.key + ': ' + (modMenuToggles[r.key]?'ON':'OFF'), modMenuToggles[r.key]?'#6fe3d2':'#9fb4c8');
+        hit = true;
+        break;
+      }
+    }
+    if(!hit) modMenuOpen = false;  // clicar fora fecha
+    return;
+  }
   if(state!=='title') return;
   for(const r of menuBtnRects){
     if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
@@ -2562,6 +2923,8 @@ function render(){
   drawPost();
   drawHud();
   drawScreens();
+  drawModMenu();
+  drawConsole();
   lights.length=0;
 }
 
