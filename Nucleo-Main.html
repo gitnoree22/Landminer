@@ -19,6 +19,11 @@
   #settings-overlay input[type=range]{height:4px;background:#1a2a30;border-radius:2px}
   #settings-overlay input[type=range]::-webkit-slider-thumb{width:12px;height:12px;background:#6fe3d2;border-radius:50%;cursor:pointer}
   #settings-overlay input[type=range]::-moz-range-thumb{width:12px;height:12px;background:#6fe3d2;border-radius:50%;cursor:pointer;border:none}
+  /* menu principal */
+  body.menu-active{cursor:default}
+  #menu-overlay{position:fixed;inset:0;z-index:30;display:none;pointer-events:auto}
+  body.menu-active #menu-overlay{display:block}
+  #menu-overlay .btn{cursor:pointer}
 </style>
 </head>
 <body>
@@ -27,6 +32,7 @@
 <div id="probe"></div>
 <div id="load">PERFURANDO&nbsp;CROSTA</div>
 <div id="crt-overlay"></div>
+<div id="menu-overlay"></div>
 <div id="xhair"><svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="9" fill="none" stroke="#6fe3d2" stroke-width="1" opacity="0.55"/><line x1="14" y1="2" x2="14" y2="9" stroke="#6fe3d2" stroke-width="1.5"/><line x1="14" y1="19" x2="14" y2="26" stroke="#6fe3d2" stroke-width="1.5"/><line x1="2" y1="14" x2="9" y2="14" stroke="#6fe3d2" stroke-width="1.5"/><line x1="19" y1="14" x2="26" y2="14" stroke="#6fe3d2" stroke-width="1.5"/><circle cx="14" cy="14" r="1.5" fill="#6fe3d2"/></svg></div>
 <div id="settings-overlay" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(2,4,8,0.78);z-index:50;font:13px/1.5 Consolas,monospace">
   <div style="background:#0a0f16;border:1px solid #1f4654;border-radius:8px;padding:22px 26px;min-width:300px;color:#cfe8f2;box-shadow:0 0 40px rgba(0,200,200,0.12)">
@@ -604,6 +610,24 @@ try{
   crtEnabled = localStorage.getItem('nucleo_crt')==='1';
   if(crtEnabled) document.body.classList.add('crt-on');
 }catch(e){}
+// estado do menu principal (studio-grade)
+let menuSelectedMode = Q.get('mode') || 'classic';   // modo selecionado no menu (pode diferir de gameMode até iniciar)
+let menuHoveredMode = null;                            // modo sob o mouse (null = usar teclado)
+let menuHoveredButton = null;                         // 'play' | 'settings' | null
+const MENU_MODES = [
+  {key:'classic',  label:'CLÁSSICO',  tag:'CAMPEONATO',  num:'01'},
+  {key:'fossa',    label:'FOSSA',     tag:'ENDLESS',      num:'02'},
+  {key:'hardcore', label:'HARDCORE',  tag:'PERMADEATH',   num:'03'},
+  {key:'daily',    label:'DIÁRIO',    tag:'DATA DE HOJE', num:'04'},
+];
+const MENU_MODE_DETAIL = {
+  classic:  {title:'Operação Padrão',        tagline:'Pegue o núcleo. Fuja do magma. Sobreviva.',         desc:'A experiência NÚCLEO completa. Desça pela crosta até a câmara magmática, extraia o núcleo e suba antes que o magma tome a mina. Cotas de cristais concedem reparos e bombas extras.'},
+  fossa:    {title:'Operação Fossa',          tagline:'Sem núcleo. Sem limite. Só profundidade.',          desc:'Modo endless. A câmara do núcleo nunca existiu — desça o máximo que conseguir. Recorde é medido só em profundidade máxima alcançada. Menos caches de bombas no caminho.'},
+  hardcore: {title:'Operação Crítica',        tagline:'Sem milestones. Sem caches. Sem piedade.',          desc:'Para veteranos. Sem cotas de cristais (não há heal nem bomba extra por milestone), sem caches de bombas escondidas, mais vermes por profundidade. Cada morte é definitiva — reinício só por nova semente.'},
+  daily:    {title:'Operação Diária',         tagline:'Todos no mesmo mundo. Uma vez por dia.',            desc:'A semente é derivada da data de hoje. Todos que jogam NÚCLEO hoje enfrentam exatamente o mesmo mundo. Compare runs com a comunidade. Reiniciar mantém a mesma semente.'},
+};
+const GAME_VERSION = 'v1.4.0-dev';
+const GAME_STUDIO = 'Z.AI LABS — PROTOCOLO NÚCLEO';
 try{
   reduceFlash = localStorage.getItem('nucleo_reduce_flash')==='1';
   const v = parseFloat(localStorage.getItem('nucleo_volume'));
@@ -1563,65 +1587,345 @@ function drawMsgs(){
   ctx.globalAlpha=1;
 }
 
+/* ===== menu principal (studio-grade) ===== */
+let menuBtnRects = [];  // retângulos clicáveis, populados a cada frame
+function drawMainMenu(){
+  // overlay escurecido com gradiente vertical
+  let g=ctx.createLinearGradient(0,0,0,cssH);
+  g.addColorStop(0,'rgba(2,4,8,0.86)');
+  g.addColorStop(0.5,'rgba(3,6,12,0.78)');
+  g.addColorStop(1,'rgba(8,4,2,0.86)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,cssW,cssH);
+  // ===== ATMOSFERA DE FUNDO =====
+  // 1. halo verde-azulado no canto inferior esquerdo (respiração lenta)
+  const haloPulse = 0.6 + 0.4*Math.sin(simFrames*0.012);
+  const hg = ctx.createRadialGradient(cssW*0.15, cssH*0.85, 50, cssW*0.15, cssH*0.85, cssW*0.5);
+  hg.addColorStop(0, 'rgba(16,200,180,'+(0.18*haloPulse).toFixed(2)+')');
+  hg.addColorStop(0.5, 'rgba(8,80,100,'+(0.06*haloPulse).toFixed(2)+')');
+  hg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = hg; ctx.fillRect(0,0,cssW,cssH);
+  // 2. halo laranja no canto superior direito (alusão ao magma)
+  const haloPulse2 = 0.5 + 0.5*Math.sin(simFrames*0.008 + 1.5);
+  const hg2 = ctx.createRadialGradient(cssW*0.9, cssH*0.1, 30, cssW*0.9, cssH*0.1, cssW*0.4);
+  hg2.addColorStop(0, 'rgba(255,140,40,'+(0.12*haloPulse2).toFixed(2)+')');
+  hg2.addColorStop(0.5, 'rgba(120,40,0,'+(0.04*haloPulse2).toFixed(2)+')');
+  hg2.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = hg2; ctx.fillRect(0,0,cssW,cssH);
+  // 3. grid técnico sutil (linhas finas)
+  ctx.strokeStyle='rgba(111,227,210,0.035)'; ctx.lineWidth=1;
+  const gridSize = 60;
+  const gridOffsetX = (simFrames*0.15) % gridSize;
+  const gridOffsetY = (simFrames*0.08) % gridSize;
+  ctx.beginPath();
+  for(let x=-gridOffsetX; x<cssW; x+=gridSize){
+    ctx.moveTo(x, 0); ctx.lineTo(x, cssH);
+  }
+  for(let y=-gridOffsetY; y<cssH; y+=gridSize){
+    ctx.moveTo(0, y); ctx.lineTo(cssW, y);
+  }
+  ctx.stroke();
+  // 4. partículas ambiente (drift lento, faíscas subindo)
+  if((simFrames%3)===0 && parts.length<MAXP-200){
+    spawnPart(Math.random()*cssW/SCALE+renderWorld.vx0, renderWorld.vy0+cssH/SCALE+5,
+      (Math.random()-0.5)*0.06, -0.04-Math.random()*0.05,
+      80+Math.random()*60, 100+Math.random()*60, 130+Math.random()*60, -1, 120+Math.random()*120, true);
+  }
+  // scan line sutil passando pela tela (lembrando CRT)
+  const scanY = (simFrames*1.6) % (cssH+80) - 40;
+  const sg=ctx.createLinearGradient(0,scanY-30,0,scanY+30);
+  sg.addColorStop(0,'rgba(111,227,210,0)');
+  sg.addColorStop(0.5,'rgba(111,227,210,0.05)');
+  sg.addColorStop(1,'rgba(111,227,210,0)');
+  ctx.fillStyle=sg; ctx.fillRect(0,scanY-30,cssW,60);
+  // layout 2 colunas
+  const pad = Math.max(28, Math.min(60, cssW*0.04));
+  const colGap = 40;
+  const colW = (cssW - pad*2 - colGap) / 2;
+  const leftX = pad;
+  const rightX = pad + colW + colGap;
+  // ===== COLUNA ESQUERDA: branding + modos =====
+  drawBrandBlock(leftX, pad, colW);
+  drawModeList(leftX, pad + 230, colW);
+  // ===== COLUNA DIREITA: detalhe do modo selecionado + recorde + botão jogar =====
+  drawModeDetail(rightX, pad, colW);
+  // ===== FOOTER =====
+  drawMenuFooter(pad);
+}
+function drawBrandBlock(x,y,w){
+  // pequeno selo "Z.AI LABS" no topo
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.55)';
+  ctx.fillText('▮ '+GAME_STUDIO, x, y);
+  // linha decorativa
+  ctx.strokeStyle='rgba(111,227,210,0.25)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x, y+18); ctx.lineTo(x+80, y+18); ctx.stroke();
+  // título "NÚCLEO" com tracking largo + gradiente + glow
+  const titleSize = Math.min(96, Math.max(56, cssW*0.075));
+  ctx.font='bold '+titleSize+'px Consolas,monospace';
+  // letter-spacing manual: desenhar letra por letra
+  const titleText = 'NÚCLEO';
+  const letterSpacing = titleSize * 0.12;
+  let totalW = 0;
+  for(let i=0;i<titleText.length;i++) totalW += ctx.measureText(titleText[i]).width;
+  totalW += letterSpacing*(titleText.length-1);
+  let cx = x + (w - totalW)/2;
+  const titleY = y + 50;
+  // glow pulsante
+  const pulse = 0.85 + 0.15*Math.sin(simFrames*0.05);
+  ctx.shadowColor = '#16e0c8';
+  ctx.shadowBlur = 28*pulse;
+  const tg=ctx.createLinearGradient(0,titleY,0,titleY+titleSize);
+  tg.addColorStop(0,'#eafffb');
+  tg.addColorStop(0.6,'#6fe3d2');
+  tg.addColorStop(1,'#1a8b7a');
+  ctx.fillStyle=tg;
+  for(let i=0;i<titleText.length;i++){
+    ctx.fillText(titleText[i], cx, titleY);
+    cx += ctx.measureText(titleText[i]).width + letterSpacing;
+  }
+  ctx.shadowBlur=0;
+  // subtitle
+  ctx.font='12px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.85)';
+  ctx.letterSpacing='2px';
+  ctx.fillText('PROTOCOLO DE EXTRAÇÃO  ·  COLÔNIA KEPLER-442', x, titleY+titleSize+12);
+  // tagline em itálico simulado (mais largo)
+  ctx.font='bold 14px Consolas,monospace';
+  ctx.fillStyle='rgba(190,210,225,0.92)';
+  ctx.fillText('Desça. Encontre o NÚCLEO. Suba vivo.', x, titleY+titleSize+34);
+  // linha separadora
+  ctx.strokeStyle='rgba(111,227,210,0.4)'; ctx.lineWidth=1.5;
+  ctx.beginPath();
+  ctx.moveTo(x, titleY+titleSize+62);
+  ctx.lineTo(x+60, titleY+titleSize+62);
+  ctx.stroke();
+  ctx.strokeStyle='rgba(111,227,210,0.12)';
+  ctx.beginPath();
+  ctx.moveTo(x+62, titleY+titleSize+62);
+  ctx.lineTo(x+w, titleY+titleSize+62);
+  ctx.stroke();
+}
+function drawModeList(x,y,w){
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  // header da seção
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.7)';
+  ctx.fillText('▾ SELECIONE A OPERAÇÃO', x, y);
+  menuBtnRects = [];  // reset
+  const itemH = 56;
+  const gap = 8;
+  for(let i=0;i<MENU_MODES.length;i++){
+    const m = MENU_MODES[i];
+    const sel = menuSelectedMode === m.key;
+    const hov = menuHoveredMode === m.key;
+    const yy = y + 24 + i*(itemH+gap);
+    // animação de slide + breathing no item selecionado
+    const pulse = sel ? (Math.sin(simFrames*0.06)*0.15 + 0.85) : 1;
+    const slideOff = sel ? Math.sin(simFrames*0.05)*2 + 4 : 0;
+    const xx = x + slideOff;
+    // fundo
+    let bgAlpha = sel ? 0.22*pulse : (hov ? 0.12 : 0.04);
+    ctx.fillStyle='rgba(111,227,210,'+bgAlpha.toFixed(2)+')';
+    roundRect(xx, yy, w, itemH, 4); ctx.fill();
+    // barra lateral esquerda (indicador de seleção)
+    if(sel){
+      // glow intenso pulsante
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      ctx.fillStyle='rgba(111,227,210,'+(0.6*pulse).toFixed(2)+')';
+      ctx.fillRect(xx-3, yy, 8, itemH);
+      ctx.fillStyle='rgba(111,227,210,'+(0.3*pulse).toFixed(2)+')';
+      ctx.fillRect(xx-6, yy, 14, itemH);
+      ctx.restore();
+      ctx.fillStyle='#6fe3d2';
+      ctx.fillRect(xx, yy, 3, itemH);
+    } else if(hov){
+      ctx.fillStyle='rgba(111,227,210,0.5)';
+      ctx.fillRect(xx, yy, 3, itemH);
+    }
+    // borda
+    ctx.strokeStyle = sel ? 'rgba(111,227,210,'+(0.7*pulse).toFixed(2)+')' : (hov ? 'rgba(111,227,210,0.3)' : 'rgba(40,60,72,0.5)');
+    ctx.lineWidth = sel ? 1.5 : 1;
+    roundRect(xx, yy, w, itemH, 4); ctx.stroke();
+    // número do modo
+    ctx.font='bold 22px Consolas,monospace';
+    ctx.fillStyle = sel ? '#6fe3d2' : (hov ? 'rgba(111,227,210,0.8)' : 'rgba(80,100,115,0.7)');
+    ctx.fillText(m.num, xx+16, yy+14);
+    // label
+    ctx.font='bold 15px Consolas,monospace';
+    ctx.fillStyle = sel ? '#eafffb' : (hov ? '#cfe8f2' : '#7da3b8');
+    ctx.fillText(m.label, xx+58, yy+12);
+    // tag
+    ctx.font='9px Consolas,monospace';
+    ctx.fillStyle = sel ? 'rgba(111,227,210,0.85)' : 'rgba(80,100,115,0.7)';
+    ctx.fillText(m.tag, xx+58, yy+34);
+    // tecla de atalho à direita
+    ctx.font='bold 11px Consolas,monospace';
+    ctx.fillStyle = sel ? 'rgba(111,227,210,0.9)' : 'rgba(80,100,115,0.6)';
+    ctx.textAlign='right';
+    ctx.fillText('['+(i+1)+']', xx+w-14, yy+22);
+    ctx.textAlign='left';
+    // registrar área clicável
+    menuBtnRects.push({type:'mode', key:m.key, x, y:yy, w, h:itemH});
+  }
+}
+function drawModeDetail(x,y,w){
+  const m = MENU_MODE_DETAIL[menuSelectedMode] || MENU_MODE_DETAIL.classic;
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  // header
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.7)';
+  ctx.fillText('▾ BRIEFING DA OPERAÇÃO', x, y);
+  // painel
+  const panelY = y + 24;
+  const panelH = Math.min(280, cssH - panelY - 140);
+  // fundo do painel com gradiente sutil
+  let pg=ctx.createLinearGradient(x,panelY,x,panelY+panelH);
+  pg.addColorStop(0,'rgba(15,30,38,0.6)');
+  pg.addColorStop(1,'rgba(8,16,22,0.4)');
+  ctx.fillStyle=pg;
+  roundRect(x, panelY, w, panelH, 6); ctx.fill();
+  ctx.strokeStyle='rgba(111,227,210,0.25)'; ctx.lineWidth=1;
+  roundRect(x, panelY, w, panelH, 6); ctx.stroke();
+  // (watermark removido — era confundido com elemento ativo)
+  // título do modo
+  ctx.font='bold 22px Consolas,monospace';
+  ctx.fillStyle='#eafffb';
+  ctx.fillText(m.title, x+20, panelY+20);
+  // tagline
+  ctx.font='italic 13px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.85)';
+  ctx.fillText('"'+m.tagline+'"', x+20, panelY+52);
+  // separador
+  ctx.strokeStyle='rgba(111,227,210,0.25)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x+20, panelY+78); ctx.lineTo(x+w-20, panelY+78); ctx.stroke();
+  // descrição (com quebra de linha manual)
+  ctx.font='12px Consolas,monospace';
+  ctx.fillStyle='rgba(190,210,225,0.85)';
+  const words = m.desc.split(' ');
+  let line = '';
+  let dy = panelY+96;
+  const maxW = w - 40;
+  for(let i=0;i<words.length;i++){
+    const test = line + (line?' ':'') + words[i];
+    if(ctx.measureText(test).width > maxW){
+      ctx.fillText(line, x+20, dy);
+      line = words[i];
+      dy += 18;
+    } else {
+      line = test;
+    }
+  }
+  if(line) ctx.fillText(line, x+20, dy);
+  // estatísticas do modo (linha de meta-info)
+  dy += 32;
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.55)';
+  const meta = modeMeta(menuSelectedMode);
+  ctx.fillText(meta, x+20, dy);
+  // recorde do modo (se houver)
+  const best = loadBestStats();
+  if(best.depth > 0){
+    dy += 18;
+    ctx.font='bold 11px Consolas,monospace';
+    ctx.fillStyle='rgba(255,210,120,0.85)';
+    ctx.fillText('RECORDE PESSOAL', x+20, dy);
+    dy += 16;
+    ctx.font='10px Consolas,monospace';
+    ctx.fillStyle='rgba(190,210,225,0.75)';
+    ctx.fillText('profundidade '+best.depth+'m   ·   '+best.crystals+' cristais'+(best.won?'   ·   VENCEU':''), x+20, dy);
+  }
+  // ===== BOTÃO JOGAR =====
+  const btnY = panelY + panelH + 20;
+  const btnH = 56;
+  const btnW = w;
+  const btnHover = menuHoveredButton === 'play';
+  const btnPulse = 0.85 + 0.15*Math.sin(simFrames*0.08);
+  // glow externo pulsante (atrás do botão)
+  ctx.save(); ctx.globalCompositeOperation='lighter';
+  ctx.fillStyle='rgba(111,227,210,'+(0.12*btnPulse).toFixed(2)+')';
+  roundRect(x-4, btnY-4, btnW+8, btnH+8, 6); ctx.fill();
+  ctx.fillStyle='rgba(111,227,210,'+(0.06*btnPulse).toFixed(2)+')';
+  roundRect(x-10, btnY-10, btnW+20, btnH+20, 8); ctx.fill();
+  ctx.restore();
+  // fundo do botão com gradiente
+  let bg=ctx.createLinearGradient(x,btnY,x,btnY+btnH);
+  if(btnHover){
+    bg.addColorStop(0,'rgba(111,227,210,'+(0.5*btnPulse).toFixed(2)+')');
+    bg.addColorStop(1,'rgba(22,224,200,'+(0.3*btnPulse).toFixed(2)+')');
+  } else {
+    bg.addColorStop(0,'rgba(111,227,210,'+(0.28*btnPulse).toFixed(2)+')');
+    bg.addColorStop(1,'rgba(22,224,200,'+(0.14*btnPulse).toFixed(2)+')');
+  }
+  ctx.fillStyle=bg;
+  roundRect(x, btnY, btnW, btnH, 4); ctx.fill();
+  // brilho interno no topo do botão
+  let sheen=ctx.createLinearGradient(x,btnY,x,btnY+btnH/2);
+  sheen.addColorStop(0,'rgba(255,255,255,'+(btnHover?0.18:0.10)+')');
+  sheen.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=sheen;
+  roundRect(x, btnY, btnW, btnH/2, 4); ctx.fill();
+  // borda
+  ctx.strokeStyle = btnHover ? '#6fe3d2' : 'rgba(111,227,210,'+(0.6*btnPulse).toFixed(2)+')';
+  ctx.lineWidth = btnHover ? 2 : 1.2;
+  roundRect(x, btnY, btnW, btnH, 4); ctx.stroke();
+  // texto do botão
+  ctx.font='bold 20px Consolas,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle = btnHover ? '#ffffff' : 'rgba(234,255,251,'+btnPulse.toFixed(2)+')';
+  ctx.shadowColor='#6fe3d2'; ctx.shadowBlur = btnHover ? 20 : 12;
+  ctx.fillText('▶  INICIAR EXTRAÇÃO', x+btnW/2, btnY+btnH/2);
+  ctx.shadowBlur=0;
+  // seta lateral (decoração)
+  ctx.font='bold 14px Consolas,monospace';
+  ctx.fillStyle='rgba(234,255,251,0.6)';
+  ctx.textAlign='right';
+  ctx.fillText('[ENTER]', x+btnW-12, btnY+btnH-8);
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  // hint de teclado
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.55)';
+  ctx.fillText('[ENTER] ou [ESPAÇO] para começar', x+4, btnY+btnH+6);
+  // registrar área clicável
+  menuBtnRects.push({type:'play', x, y:btnY, w:btnW, h:btnH});
+}
+function modeMeta(mode){
+  if(mode==='classic')  return 'DIFICULDADE: PADRÃO   ·   DURAÇÃO: ~15-25 MIN   ·   CACHES: 12';
+  if(mode==='fossa')    return 'DIFICULDADE: FÁCIL-INÍCIO   ·   DURAÇÃO: ILIMITADA   ·   CACHES: 8';
+  if(mode==='hardcore') return 'DIFICULDADE: EXTREMA   ·   DURAÇÃO: ATÉ MORRER   ·   CACHES: 0';
+  if(mode==='daily')    return 'DIFICULDADE: PADRÃO   ·   DURAÇÃO: ~15-25 MIN   ·   SEED: '+dailySeed();
+  return '';
+}
+function drawMenuFooter(pad){
+  const fy = cssH - 52;
+  // linha decorativa no topo do footer
+  ctx.strokeStyle='rgba(111,227,210,0.18)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(pad, fy-10); ctx.lineTo(cssW-pad, fy-10); ctx.stroke();
+  // controles (esquerda)
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.font='11px Consolas,monospace';
+  ctx.fillStyle='rgba(160,180,195,0.75)';
+  ctx.fillText('CONTROLES', pad, fy);
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.75)';
+  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config', pad, fy+16);
+  // versão (direita)
+  ctx.textAlign='right';
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(160,180,195,0.7)';
+  ctx.fillText(GAME_VERSION, cssW-pad, fy);
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.6)';
+  ctx.fillText('semente '+SEED+'   ·   '+new Date().getFullYear()+' '+GAME_STUDIO, cssW-pad, fy+16);
+  ctx.textAlign='left';
+}
+
 /* telas */
 function drawScreens(){
   ctx.save();
   ctx.textAlign='center';
   if(state==='title'){
-    ctx.fillStyle='rgba(3,5,10,0.55)'; ctx.fillRect(0,0,cssW,cssH);
-    const cy=cssH*0.34;
-    ctx.font='bold '+Math.min(86,cssW/9)+'px Consolas,monospace';
-    const fl=0.92+0.08*Math.sin(simFrames*0.07)+(Math.random()<0.02?-0.2:0);
-    ctx.shadowColor='#16e0c8'; ctx.shadowBlur=34*fl;
-    const grd=ctx.createLinearGradient(0,cy-50,0,cy+22);
-    grd.addColorStop(0,'#eafffb'); grd.addColorStop(1,'#3ad6c2');
-    ctx.fillStyle=grd;
-    ctx.fillText('N Ú C L E O',cssW/2,cy);
-    ctx.shadowBlur=0;
-    ctx.font='13px Consolas,monospace'; ctx.fillStyle='#7da3b8';
-    ctx.fillText('protocolo de extração — colônia kepler-442',cssW/2,cy+30);
-    ctx.fillStyle='#b8d4e2'; ctx.font='14px Consolas,monospace';
-    ctx.fillText('Desça. Encontre o NÚCLEO. Volte vivo.',cssW/2,cy+66);
-    const bl=0.55+0.45*Math.sin(simFrames*0.1);
-    ctx.fillStyle='rgba(138,242,255,'+bl.toFixed(2)+')';
-    ctx.font='bold 16px Consolas,monospace';
-    ctx.fillText('[ ENTER ]  iniciar perfuração',cssW/2,cy+108);
-    ctx.font='12px Consolas,monospace'; ctx.fillStyle='#6f8ba0';
-    const lines=[
-      'WASD / SETAS — propulsores        MOUSE — mirar',
-      'BOTÃO ESQ — laser de mineração    ESPAÇO ou BOTÃO DIR (segurar) — bomba sísmica',
-      'DUPLO CLIQUE numa tecla — BOOST 2x (consome estamina)',
-      'M — som    P — pausa    O — config    R — reiniciar (Shift+R: mesma semente)'
-    ];
-    lines.forEach((l,i)=>ctx.fillText(l,cssW/2,cy+150+i*18));
-    const best=loadBest();
-    if(best){
-      ctx.fillStyle='#56707f';
-      ctx.fillText('melhor corrida: '+best,cssW/2,cy+220);
-    }
-    // C4: menu de seleção de modo
-    ctx.font='bold 12px Consolas,monospace'; ctx.fillStyle='#7da3b8';
-    ctx.fillText('MODO DE JOGO',cssW/2,cy+250);
-    const modes=[['classic','1'],['fossa','2'],['hardcore','3'],['daily','4']];
-    const my=cy+272;
-    modes.forEach((m,i)=>{
-      const x=cssW/2 + (i-1.5)*110;
-      const sel = gameMode===m[0];
-      ctx.fillStyle=sel?'rgba(111,227,210,0.18)':'rgba(20,30,40,0.4)';
-      ctx.fillRect(x-50,my-12,100,26);
-      ctx.strokeStyle=sel?'#6fe3d2':'#2a3a48'; ctx.lineWidth=1;
-      ctx.strokeRect(x-50,my-12,100,26);
-      ctx.font='bold 11px Consolas,monospace';
-      ctx.fillStyle=sel?'#6fe3d2':'#9fb4c8';
-      ctx.fillText('['+m[1]+'] '+MODE_INFO[m[0]].label,x,my+2);
-    });
-    ctx.font='10px Consolas,monospace'; ctx.fillStyle='#5d7689';
-    ctx.fillText(MODE_INFO[gameMode].desc,cssW/2,my+30);
-    // dica de controles
-    ctx.font='10px Consolas,monospace'; ctx.fillStyle='#44535f';
-    ctx.fillText('tecle 1-4 para mudar modo   ·   O: configurações',cssW/2,my+50);
-    ctx.fillStyle='#44535f'; ctx.font='11px Consolas,monospace';
-    ctx.fillText('cada pixel deste mundo é simulado — semente '+SEED,cssW/2,cssH-24);
+    drawMainMenu();
   }
   if(paused&&state==='play'){
     ctx.fillStyle='rgba(3,5,10,0.55)'; ctx.fillRect(0,0,cssW,cssH);
@@ -2020,7 +2324,22 @@ addEventListener('keydown',e=>{
       P.lastKeyTimes[e.code]=now;
     }
   }
-  if(e.code==='Enter'&&state==='title') startRun();
+  if(state==='title'){
+    if(e.code==='Enter'||e.code==='Space'){
+      gameMode = menuSelectedMode;
+      startRun(menuSelectedMode);
+    } else if(e.code==='ArrowUp'||e.code==='ArrowLeft'){
+      let idx = MENU_MODES.findIndex(m=>m.key===menuSelectedMode);
+      idx = (idx-1+MENU_MODES.length)%MENU_MODES.length;
+      menuSelectedMode = MENU_MODES[idx].key;
+      menuHoveredMode = null;
+    } else if(e.code==='ArrowDown'||e.code==='ArrowRight'){
+      let idx = MENU_MODES.findIndex(m=>m.key===menuSelectedMode);
+      idx = (idx+1)%MENU_MODES.length;
+      menuSelectedMode = MENU_MODES[idx].key;
+      menuHoveredMode = null;
+    }
+  }
   else if(e.code==='Space'&&state==='play'&&!paused) throwBomb(2.6);
   else if(e.code==='KeyM'){ audioInit(); setMute(!AU.muted); }
   else if(e.code==='KeyP'||e.code==='Escape'){
@@ -2034,10 +2353,10 @@ addEventListener('keydown',e=>{
   }
   else if(e.code==='KeyR'&&state!=='title'){ restart(e.shiftKey); }
   else if(state==='title'){
-    if(e.code==='Digit1'){ gameMode='classic'; }
-    else if(e.code==='Digit2'){ gameMode='fossa'; }
-    else if(e.code==='Digit3'){ gameMode='hardcore'; }
-    else if(e.code==='Digit4'){ gameMode='daily'; }
+    if(e.code==='Digit1'){ menuSelectedMode='classic'; }
+    else if(e.code==='Digit2'){ menuSelectedMode='fossa'; }
+    else if(e.code==='Digit3'){ menuSelectedMode='hardcore'; }
+    else if(e.code==='Digit4'){ menuSelectedMode='daily'; }
   }
   // C5: teclas 1 e 2 para reiniciar com mesma/nova semente em dead/win
   else if((state==='dead'||state==='win')){
@@ -2050,6 +2369,28 @@ cv.addEventListener('mousemove',e=>{
   mouse.x=e.clientX; mouse.y=e.clientY;
   const xh=document.getElementById('xhair');
   if(xh){ xh.style.left=e.clientX+'px'; xh.style.top=e.clientY+'px'; }
+  // menu principal: detectar hover sobre modos e botão
+  if(state==='title'){
+    menuHoveredMode = null;
+    menuHoveredButton = null;
+    for(const r of menuBtnRects){
+      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+        if(r.type==='mode'){ menuHoveredMode = r.key; menuSelectedMode = r.key; }
+        else if(r.type==='play'){ menuHoveredButton = 'play'; }
+        break;
+      }
+    }
+  }
+});
+cv.addEventListener('click',e=>{
+  if(state!=='title') return;
+  for(const r of menuBtnRects){
+    if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+      if(r.type==='mode'){ menuSelectedMode = r.key; }
+      else if(r.type==='play'){ gameMode = menuSelectedMode; startRun(menuSelectedMode); }
+      break;
+    }
+  }
 });
 cv.addEventListener('mousedown',e=>{
   audioInit();
@@ -2122,7 +2463,7 @@ function startRun(mode){
   audioInit();
   if(AU.ctx&&AU.ctx.state==='suspended')AU.ctx.resume();
   // C4: define modo e semente
-  gameMode = mode || gameMode || 'classic';
+  gameMode = mode || menuSelectedMode || gameMode || 'classic';
   if(gameMode==='daily') SEED = dailySeed();
   else if(!Q.get('seed')) {
     // semente aleatória já foi gerada no boot; mantém
@@ -2208,6 +2549,7 @@ function stepGame(){
 }
 function updateCursor(){
   document.body.classList.toggle('playing', state==='play' && !paused);
+  document.body.classList.toggle('menu-active', state==='title');
 }
 function render(){
   lights.length=Math.min(lights.length,40);
