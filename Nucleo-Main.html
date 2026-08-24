@@ -574,6 +574,8 @@ function tryDeposit(p){
 }
 function crystalFx(x,y){
   stats.crystals++;
+  // Oil Era: cristais vão para runInventory (perdidos se morrer)
+  if(isPersistentMode()) runInventory.crystals++;
   for(let k=0;k<2;k++) spawnPart(x,y,(Math.random()-0.5)*2,-Math.random()*2,140,255,240,-1,30+Math.random()*30,true);
   if(Math.random()<0.12) pickups.push({type:1,x,y,vx:(Math.random()-0.5)*1.5,vy:-1.5,t:0});
   sfxPing();
@@ -583,7 +585,7 @@ function crystalFx(x,y){
     say('BASE','Cota de cristais atingida — reparo remoto +12, bomba extra.');
     sfxCollect();
   }
-  if(!MS.cry){ MS.cry=true; say('BASE','Cristais de hélios detectados. Extraia o quanto puder.'); }
+  if(!MS.cry){ MS.cry=true; say('BASE','Cristais de hélios detectados. '+(isPersistentMode()?'Deposite no pad para preservá-los.':'Extraia o quanto puder.')); }
 }
 function sizzleFx(x,y){
   for(let k=0;k<3;k++) spawnPart(x,y,(Math.random()-0.5)*1.5,-Math.random()*1.8-0.4,220,230,240,-1,20+Math.random()*25,true);
@@ -591,7 +593,7 @@ function sizzleFx(x,y){
 }
 
 /* ---------------- entidades ---------------- */
-const P={x:0,y:0,vx:0,vy:0,hp:100,bombs:3,alive:true,aim:0,thr:0,hurtCd:0,inLiq:0,deathCause:'',stamina:100,boostActive:false,boostTimer:0,lastKeyTimes:{}};
+const P={x:0,y:0,vx:0,vy:0,hp:100,bombs:3,alive:true,aim:0,thr:0,hurtCd:0,inLiq:0,deathCause:'',stamina:100,boostActive:false,boostTimer:0,lastKeyTimes:{},maxHP:100,maxBombs:3,maxStamina:100,moveSpeedMul:1,lightRadiusMul:1,drillPowerMul:1};
 let worms=[], bombs=[], pickups=[], texts=[], lights=[];
 let coreTaken=false, coreGone=false, tideY=1e9, tideOn=false;
 let wormTimer=600;
@@ -852,7 +854,7 @@ function drawModMenu(){
   ctx.shadowBlur=0;
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(125,163,184,0.7)';
-  ctx.fillText('feche com [\'] ou clique fora', px+pw/2, py+38);
+  ctx.fillText('feche com [ESC] ou clique fora', px+pw/2, py+38);
   // toggles
   modMenuRects = [];
   const toggles = [
@@ -929,6 +931,183 @@ function dailySeed(){
   const d = new Date();
   return (((d.getFullYear()*10000) + ((d.getMonth()+1)*100) + d.getDate()) >>> 0) || 1;
 }
+/* ===== Oil Era: economia persistente ===== */
+const SAVE_VERSION = 2;
+function saveKey(){ return 'nucleo_save_' + gameMode + '_v' + SAVE_VERSION; }
+// banco: persiste entre corridas (saldo, estoque, preço, upgrades)
+let bank = {
+  money: 0,           // dinheiro acumulado
+  crystals: 0,        // cristais em estoque (aguardando venda)
+  price: 50,          // preço atual do cristal
+  priceTrend: 0,      // -1, 0, +1 (para seta na UI)
+  priceHistory: [],   // últimos N preços para gráfico
+  coreExtracted: false,// núcleo já foi pego nesta mina?
+  totalEarned: 0,     // estatística: total já ganho
+  runsCompleted: 0,   // estatística: corridas seguras
+  runsLost: 0,        // estatística: corridas perdidas
+  upgrades: {},       // upgrades permanentes comprados
+  lastSeen: Date.now(),// timestamp da última sessão (para simulação offline)
+};
+// inventário de corrida: perdido se morrer, depositado se chegar ao pad
+let runInventory = {
+  crystals: 0,         // cristais coletados na corrida atual
+  bombsFound: 0,       // caches de bomba coletados
+  maxDepth: 0,         // profundidade máxima nesta corrida
+  value: 0,            // valor estimado (crystals * price atual)
+};
+let worldSaved = false;  // true se o mundo já foi carregado/gerado e salvo
+// upgrades permanentes (loja Fase 3 - stub por enquanto)
+const UPGRADES = {
+  drillPower:  {name:'POTÊNCIA DO LASER', desc:'+25% velocidade de mineração por nível', maxLevel:4, baseCost:2000},
+  maxHP:       {name:'CASCO REFORÇADO',    desc:'+20 HP máximo por nível',              maxLevel:4, baseCost:2500},
+  maxBombs:    {name:'CARGA EXTRA',       desc:'+2 bombas no início por nível',        maxLevel:3, baseCost:3000},
+  lightRadius: {name:'LANTErna AMPLA',    desc:'+20% raio de luz por nível',           maxLevel:3, baseCost:1800},
+  moveSpeed:   {name:'MOTORES OTIMIZADOS', desc:'+15% velocidade de movimento por nível',maxLevel:3, baseCost:2200},
+  staminaMax:  {name:'CAPACITOR DE ESTAMINA', desc:'+25 estamina máxima por nível',     maxLevel:3, baseCost:1500},
+};
+function upgradeLevel(key){ return bank.upgrades[key] || 0; }
+function upgradeCost(key){
+  const u = UPGRADES[key];
+  const lvl = upgradeLevel(key);
+  if(lvl >= u.maxLevel) return -1;
+  return Math.floor(u.baseCost * Math.pow(1.6, lvl));
+}
+function buyUpgrade(key){
+  const cost = upgradeCost(key);
+  if(cost < 0 || bank.money < cost) return false;
+  bank.money -= cost;
+  bank.upgrades[key] = (bank.upgrades[key]||0) + 1;
+  applyUpgrades();
+  saveGame();
+  return true;
+}
+function applyUpgrades(){
+  // aplica efeitos dos upgrades nos stats base do player
+  P.maxHP = 100 + upgradeLevel('maxHP') * 20;
+  P.maxBombs = 3 + upgradeLevel('maxBombs') * 2;
+  P.maxStamina = 100 + upgradeLevel('staminaMax') * 25;
+  P.moveSpeedMul = 1 + upgradeLevel('moveSpeed') * 0.15;
+  P.lightRadiusMul = 1 + upgradeLevel('lightRadius') * 0.20;
+  P.drillPowerMul = 1 + upgradeLevel('drillPower') * 0.25;
+}
+// RLE compression para Uint8Array
+function rleEncode(arr){
+  const out = [];
+  let i = 0;
+  while(i < arr.length){
+    let v = arr[i], c = 1;
+    while(i+c < arr.length && arr[i+c] === v && c < 255) c++;
+    out.push(c, v);
+    i += c;
+  }
+  return out;
+}
+function rleDecode(data, len){
+  const out = new Uint8Array(len);
+  let i = 0, j = 0;
+  while(i < data.length && j < len){
+    const c = data[i], v = data[i+1];
+    for(let k = 0; k < c && j+k < len; k++) out[j+k] = v;
+    j += c; i += 2;
+  }
+  return out;
+}
+function saveGame(){
+  if(!isPersistentMode()) return false;
+  try{
+    const gridEnc = rleEncode(grid);
+    const auxEnc = rleEncode(aux);
+    const save = {
+      v: SAVE_VERSION,
+      seed: SEED,
+      grid: gridEnc,
+      aux: auxEnc,
+      bank: bank,
+      timestamp: Date.now()
+    };
+    localStorage.setItem(saveKey(), JSON.stringify(save));
+    worldSaved = true;
+    bank.lastSeen = Date.now();
+    return true;
+  }catch(e){ console.error('save failed', e); return false; }
+}
+function loadGame(){
+  try{
+    const raw = localStorage.getItem(saveKey());
+    if(!raw) return false;
+    const save = JSON.parse(raw);
+    if(save.v !== SAVE_VERSION) return false;
+    SEED = save.seed;
+    const gridDec = rleDecode(save.grid, W*H);
+    const auxDec = rleDecode(save.aux, W*H);
+    grid.set(gridDec);
+    aux.set(auxDec);
+    // reconstroi surf e outros a partir da semente (não salvos, recalculados)
+    recomputeSurf();
+    bank = Object.assign(bank, save.bank || {});
+    if(!bank.priceHistory) bank.priceHistory = [];
+    if(!bank.upgrades) bank.upgrades = {};
+    // simula mercado offline
+    const now = Date.now();
+    const dtSec = Math.max(0, (now - (save.timestamp || now)) / 1000);
+    simulateMarket(dtSec);
+    bank.lastSeen = now;
+    worldSaved = true;
+    applyUpgrades();
+    return true;
+  }catch(e){ console.error('load failed', e); return false; }
+}
+function recomputeSurf(){
+  // recalcula surf[] a partir da semente (igual genWorld mas só a superfície)
+  const S1 = SEED & 0xffff;
+  for(let x=0;x<W;x++){
+    surf[x] = (130 + (fbm(x*0.011,0,S1+1,3)-0.5)*72 + (fbm(x*0.045,7,S1+2,2)-0.5)*18) | 0;
+  }
+  // achata plataforma de extração
+  let p=0; for(let x=padX-16;x<=padX+16;x++)p+=surf[x]; p=(p/33)|0; padY=p;
+  for(let x=padX-16;x<=padX+16;x++) surf[x]=padY;
+  // recalcula coreY
+  coreX = W>>1; coreY = H-130;
+  // reconta cristais
+  totalCrystals = 0;
+  for(let i=0;i<W*H;i++) if(grid[i]===CRY) totalCrystals++;
+}
+function isPersistentMode(){
+  return gameMode==='classic' || gameMode==='fossa';
+}
+/* mercado: random walk com mean reversion */
+function simulateMarket(dtSec){
+  // 1 step por minuto de tempo offline, máx 1440 (24h)
+  const steps = Math.min(1440, Math.floor(dtSec / 60));
+  for(let i=0;i<steps;i++){
+    marketStep();
+  }
+  // pelo menos 1 step ao entrar no hub
+  if(steps === 0) marketStep();
+}
+function marketStep(){
+  const target = 50;
+  const vol = 8;
+  const drift = (target - bank.price) * 0.03;
+  const noise = (Math.random() - 0.5) * vol;
+  const newPrice = Math.max(15, Math.min(180, bank.price + drift + noise));
+  bank.priceTrend = newPrice > bank.price ? 1 : (newPrice < bank.price ? -1 : 0);
+  bank.price = newPrice;
+  bank.priceHistory.push(bank.price);
+  if(bank.priceHistory.length > 30) bank.priceHistory.shift();
+}
+function sellCrystals(n){
+  n = n === undefined ? bank.crystals : Math.min(n, bank.crystals);
+  if(n <= 0) return 0;
+  const earned = Math.floor(n * bank.price);
+  bank.money += earned;
+  bank.totalEarned += earned;
+  bank.crystals -= n;
+  return earned;
+}
+function hasSave(){
+  try{ return !!localStorage.getItem(saveKey()); }catch(e){ return false; }
+}
 function addLight(x,y,r,p){ lights.push({x,y,r,p}); }
 function addText(x,y,s,c){ texts.push({x,y,s,c,life:90}); }
 
@@ -949,6 +1128,14 @@ function die(){
     k<10?255:160,k<10?170:170,k<10?60:180,-1,40+Math.random()*60,true);
   explodeFxOnly(P.x,P.y);
   saveBest();
+  // Oil Era: perde runInventory em modo persistente
+  if(isPersistentMode()){
+    bank.runsLost++;
+    runInventory.crystals = 0;
+    runInventory.bombsFound = 0;
+    // salva o estado do mundo (túneis cavados permanecem)
+    saveGame();
+  }
   sfxExplosion(1.2,false);
   beamSet(false); thrSet(0); growlSet(0); sfxAlarm(false);
 }
@@ -1024,10 +1211,29 @@ function stepPlayer(){
     }
   }
   if(P.hp<32&&Math.random()<0.12) spawnPart(P.x,P.y-2,(Math.random()-0.5)*0.4,-0.5,90,90,95,-1,40,true);
-  // reparo na plataforma
-  if(!coreTaken&&Math.abs(P.x-padX)<11&&Math.abs(P.y-(padY-4))<6&&P.hp<100){
-    P.hp=Math.min(100,P.hp+0.1);
-    if((simFrames%40)===0){ addText(P.x,P.y-6,'+ reparo','#7fe8a0'); sfxRepair(); }
+  // reparo na plataforma + depositar cristais (Oil Era)
+  if(Math.abs(P.x-padX)<11&&Math.abs(P.y-(padY-4))<6){
+    // reparo
+    if(P.hp<P.maxHP){
+      P.hp=Math.min(P.maxHP,P.hp+0.1);
+      if((simFrames%40)===0){ addText(P.x,P.y-6,'+ reparo','#7fe8a0'); sfxRepair(); }
+    }
+    // depositar cristais no banco (apenas modo persistente)
+    if(isPersistentMode() && runInventory.crystals > 0 && !MS.deposited){
+      MS.deposited = true;
+      bank.crystals += runInventory.crystals;
+      addText(P.x,P.y-10,'+'+runInventory.crystals+' cristais depositados','#8ff5e8');
+      say('BASE', runInventory.crystals+' cristais depositados no estoque. Venda no HUB quando o preço subir.');
+      runInventory.crystals = 0;
+      saveGame();
+    }
+    // bombas cheias ao tocar o pad
+    if(P.bombs < P.maxBombs){
+      P.bombs = P.maxBombs;
+      addText(P.x,P.y-8,'bombas reabastecidas','#ffd27f');
+    }
+  } else {
+    MS.deposited = false;
   }
   const depth=Math.max(0,(P.y-padY)|0);
   if(depth>stats.maxDepth)stats.maxDepth=depth;
@@ -1229,7 +1435,11 @@ function stepPickups(){
       let nx=p.x+p.vx, ny=p.y+p.vy;
       if(isSolidAt(nx|0,ny|0)){ p.vx*=-0.4; p.vy*=-0.4; nx=p.x; ny=p.y; }
       p.x=nx; p.y=ny;
-      if(d<5&&P.alive){ stats.crystals+=3; addText(p.x,p.y-4,'+3','#8ff5e8'); sfxCollect(); pickups.splice(k,1); }
+      if(d<5&&P.alive){
+        stats.crystals+=3;
+        if(isPersistentMode()) runInventory.crystals += 3;
+        addText(p.x,p.y-4,'+3','#8ff5e8'); sfxCollect(); pickups.splice(k,1);
+      }
       else if(p.t>1500) pickups.splice(k,1);
     } else { // caixa de bombas
       if(!isSolidAt(p.x|0,(p.y+3)|0)) p.y+=0.6;
@@ -1258,7 +1468,7 @@ function placeBombCaches(){
 
 /* núcleo e fuga */
 function stepCore(){
-  if(gameMode==='fossa') return;  // C4: sem núcleo no modo fossa
+  if(gameMode==='fossa') return;
   if(coreGone||!P.alive) return;
   const d=Math.hypot(P.x-coreX,P.y-coreY);
   if(!MS.coreNear&&d<70){ MS.coreNear=true; say('BASE','É isso. O NÚCLEO. Pegue-o e SUBA, drone.'); }
@@ -1272,6 +1482,15 @@ function stepCore(){
     tideStart=stats.t+3;
     sfxAlarm(true);
     musIntensity=1;
+    // Oil Era: bônus de dinheiro + marco permanente (não termina o jogo)
+    if(isPersistentMode() && !bank.coreExtracted){
+      bank.coreExtracted = true;
+      const bonus = 5000;
+      bank.money += bonus;
+      bank.totalEarned += bonus;
+      say('BASE','NÚCLEO EXTRAÍDO! Bônus de '+bonus+' créditos. A mina continua sua.');
+      saveGame();
+    }
   }
 }
 let tideStart=-1;
@@ -1310,7 +1529,26 @@ function stepTide(){
   }
 }
 function checkWin(){
-  if(gameMode==='fossa') return;  // C4: sem vitória no modo fossa
+  if(gameMode==='fossa') return;
+  // Oil Era: em modo persistente, chegar ao pad com core = volta ao hub (não termina)
+  if(isPersistentMode()){
+    if(coreTaken && P.alive && P.y<padY-4 && Math.abs(P.x-padX)<16){
+      // deposita cristais restantes
+      if(runInventory.crystals > 0){
+        bank.crystals += runInventory.crystals;
+        runInventory.crystals = 0;
+      }
+      bank.runsCompleted++;
+      saveGame();
+      saveBest(true);
+      state='win';  // mostra tela de vitória temporária, depois [1] volta ao hub
+      say('BASE','EXTRAÇÃO COMPLETA. Bom trabalho, VL-7.');
+      sfxWin();
+      beamSet(false); thrSet(0); growlSet(0); sfxAlarm(false);
+    }
+    return;
+  }
+  // modo não-persistente (hardcore/daily): comportamento original
   if(coreTaken&&P.alive&&P.y<padY-4&&Math.abs(P.x-padX)<16){
     state='win';
     saveBest(true);
@@ -2203,7 +2441,7 @@ function drawMenuFooter(pad){
   ctx.fillText('CONTROLES', pad, fy);
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(125,163,184,0.75)';
-  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config  ·  [\'] console', pad, fy+16);
+  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config  ·  PageUp console', pad, fy+16);
   // versão (direita)
   ctx.textAlign='right';
   ctx.font='10px Consolas,monospace';
@@ -2215,12 +2453,230 @@ function drawMenuFooter(pad){
   ctx.textAlign='left';
 }
 
+/* ===== Hub de Extração (Oil Era) ===== */
+let hubBtnRects = [];
+let hubHoveredBtn = null;
+function drawHub(){
+  // overlay escurecido
+  let g=ctx.createLinearGradient(0,0,0,cssH);
+  g.addColorStop(0,'rgba(2,4,8,0.88)');
+  g.addColorStop(0.5,'rgba(3,6,12,0.82)');
+  g.addColorStop(1,'rgba(8,4,2,0.88)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,cssW,cssH);
+  // atmosfera: halo verde + grid (reaproveita do menu)
+  const haloPulse = 0.6 + 0.4*Math.sin(simFrames*0.012);
+  const hg = ctx.createRadialGradient(cssW*0.15, cssH*0.85, 50, cssW*0.15, cssH*0.85, cssW*0.5);
+  hg.addColorStop(0, 'rgba(16,200,180,'+(0.15*haloPulse).toFixed(2)+')');
+  hg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = hg; ctx.fillRect(0,0,cssW,cssH);
+  // grid
+  ctx.strokeStyle='rgba(111,227,210,0.03)'; ctx.lineWidth=1;
+  const gridSize=60;
+  const goff=(simFrames*0.1)%gridSize;
+  ctx.beginPath();
+  for(let x=-goff;x<cssW;x+=gridSize){ ctx.moveTo(x,0); ctx.lineTo(x,cssH); }
+  for(let y=-goff;y<cssH;y+=gridSize){ ctx.moveTo(0,y); ctx.lineTo(cssW,y); }
+  ctx.stroke();
+  // scan line
+  const scanY=(simFrames*1.6)%(cssH+80)-40;
+  const sg=ctx.createLinearGradient(0,scanY-30,0,scanY+30);
+  sg.addColorStop(0,'rgba(111,227,210,0)'); sg.addColorStop(0.5,'rgba(111,227,210,0.04)'); sg.addColorStop(1,'rgba(111,227,210,0)');
+  ctx.fillStyle=sg; ctx.fillRect(0,scanY-30,cssW,60);
+  // layout
+  const pad=Math.max(28,Math.min(60,cssW*0.04));
+  const colGap=40;
+  const colW=(cssW-pad*2-colGap)/2;
+  const leftX=pad, rightX=pad+colW+colGap;
+  drawHubBrand(leftX,pad,colW);
+  drawHubActions(rightX,pad,colW);
+  drawHubFooter(pad);
+}
+function drawHubBrand(x,y,w){
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  // selo
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.55)';
+  ctx.fillText('▮ '+GAME_STUDIO+'  ·  HUB DE EXTRAÇÃO', x, y);
+  ctx.strokeStyle='rgba(111,227,210,0.25)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x,y+18); ctx.lineTo(x+80,y+18); ctx.stroke();
+  // título
+  ctx.font='bold 48px Consolas,monospace';
+  ctx.shadowColor='#16e0c8'; ctx.shadowBlur=18;
+  const tg=ctx.createLinearGradient(0,y,0,y+50);
+  tg.addColorStop(0,'#eafffb'); tg.addColorStop(1,'#3ad6c2');
+  ctx.fillStyle=tg;
+  ctx.fillText('HUB', x, y+40);
+  ctx.shadowBlur=0;
+  ctx.font='14px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.85)';
+  ctx.fillText('Colônia Kepler-442  ·  Semente '+SEED, x, y+96);
+  // painel de stats
+  const sy=y+130;
+  const sh=320;
+  let pg=ctx.createLinearGradient(x,sy,x,sy+sh);
+  pg.addColorStop(0,'rgba(15,30,38,0.6)'); pg.addColorStop(1,'rgba(8,16,22,0.4)');
+  ctx.fillStyle=pg;
+  roundRect(x,sy,w,sh,6); ctx.fill();
+  ctx.strokeStyle='rgba(111,227,210,0.25)'; ctx.lineWidth=1;
+  roundRect(x,sy,w,sh,6); ctx.stroke();
+  // header
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.7)';
+  ctx.fillText('▾ SALDO E ESTOQUE', x+16, sy+14);
+  // money
+  let yy=sy+44;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('CRÉDITOS', x+16, yy);
+  ctx.font='bold 28px Consolas,monospace';
+  ctx.fillStyle='#ffd27f';
+  ctx.shadowColor='#ffae4a'; ctx.shadowBlur=8;
+  ctx.fillText(bank.money.toLocaleString('pt-BR'), x+16, yy+14);
+  ctx.shadowBlur=0;
+  // cristais em estoque
+  yy+=56;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('CRISTAIS EM ESTOQUE', x+16, yy);
+  ctx.font='bold 22px Consolas,monospace';
+  ctx.fillStyle='#8ff5e8';
+  ctx.fillText(String(bank.crystals), x+16, yy+14);
+  // preço atual do mercado
+  yy+=56;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('PREÇO DE MERCADO', x+16, yy);
+  ctx.font='bold 22px Consolas,monospace';
+  const priceColor = bank.price > 60 ? '#69e07c' : bank.price < 40 ? '#ff5a4e' : '#cfe8f2';
+  ctx.fillStyle=priceColor;
+  const arrow = bank.priceTrend>0 ? '▲' : bank.priceTrend<0 ? '▼' : '◆';
+  ctx.fillText(bank.price.toFixed(0)+' '+arrow, x+16, yy+14);
+  // valor estimado do estoque
+  yy+=56;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('VALOR DO ESTOQUE', x+16, yy);
+  ctx.font='bold 18px Consolas,monospace';
+  ctx.fillStyle='#cfe8f2';
+  ctx.fillText((bank.crystals * bank.price).toLocaleString('pt-BR')+' cr', x+16, yy+14);
+  // mini gráfico de preço
+  yy+=56;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('TENDÊNCIA (30 steps)', x+16, yy);
+  const gx=x+16, gy=yy+18, gw=w-32, gh=50;
+  ctx.strokeStyle='rgba(111,227,210,0.15)'; ctx.lineWidth=1;
+  ctx.strokeRect(gx,gy,gw,gh);
+  if(bank.priceHistory.length>1){
+    const min=Math.min(...bank.priceHistory), max=Math.max(...bank.priceHistory);
+    const range=Math.max(1,max-min);
+    ctx.strokeStyle=priceColor; ctx.lineWidth=1.5;
+    ctx.beginPath();
+    for(let i=0;i<bank.priceHistory.length;i++){
+      const px=gx+(i/(bank.priceHistory.length-1))*gw;
+      const py=gy+gh-((bank.priceHistory[i]-min)/range)*gh;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  }
+  // núcleo extraído?
+  yy+=72;
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle=bank.coreExtracted?'#ffae4a':'rgba(80,100,115,0.6)';
+  ctx.fillText('NÚCLEO: '+(bank.coreExtracted?'★ EXTRAÍDO':'ainda não extraído'), x+16, yy);
+  ctx.textBaseline='alphabetic';
+}
+function drawHubActions(x,y,w){
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  // header
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.7)';
+  ctx.fillText('▾ OPERAÇÕES', x, y);
+  hubBtnRects = [];
+  // botão DESCER À MINA (principal)
+  let by=y+28;
+  drawHubButton(x,by,w,64,'descer','DESCER À MINA','Inicia corrida. Mundo persiste entre sessões.', '#6fe3d2', true);
+  by+=80;
+  // botão VENDER CRISTAIS
+  const sellVal = bank.crystals * bank.price;
+  drawHubButton(x,by,w,56,'vender','VENDER '+bank.crystals+' CRISTAIS','Recebe '+sellVal.toLocaleString('pt-BR')+' cr @ '+bank.price.toFixed(0)+'/un', '#ffd27f', bank.crystals>0);
+  by+=72;
+  // seção upgrades (Fase 3 - preview)
+  ctx.font='bold 10px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.5)';
+  ctx.fillText('▾ UPGRADES PERMANENTES', x, by);
+  by+=20;
+  for(const key in UPGRADES){
+    const u=UPGRADES[key];
+    const lvl=upgradeLevel(key);
+    const cost=upgradeCost(key);
+    const canAfford=cost>0 && bank.money>=cost;
+    const label=u.name+' ['+lvl+'/'+u.maxLevel+']';
+    const desc=cost<0?'MAXIMIZADO':(canAfford?u.desc+' ('+cost+' cr)':''+cost+' cr — créditos insuficientes');
+    drawHubButton(x,by,w,44,key,label,desc, canAfford?'#9ad9ff':'#5a6e85', canAfford);
+    by+=52;
+  }
+}
+function drawHubButton(x,y,w,h,key,label,desc,color,enabled){
+  const hov=hubHoveredBtn===key;
+  // fundo
+  let bg=ctx.createLinearGradient(x,y,x,y+h);
+  const alpha1=enabled?(hov?0.35:0.18):0.05;
+  const alpha2=enabled?(hov?0.20:0.10):0.03;
+  bg.addColorStop(0,'rgba(111,227,210,'+alpha1.toFixed(2)+')');
+  bg.addColorStop(1,'rgba(22,224,200,'+alpha2.toFixed(2)+')');
+  ctx.fillStyle=bg;
+  roundRect(x,y,w,h,4); ctx.fill();
+  if(hov&&enabled){
+    ctx.save(); ctx.globalCompositeOperation='lighter';
+    ctx.fillStyle='rgba(111,227,210,0.1)';
+    roundRect(x,y,w,h,4); ctx.fill();
+    ctx.restore();
+  }
+  ctx.strokeStyle=enabled?(hov?color:'rgba(111,227,210,0.4)'):'rgba(40,60,72,0.4)';
+  ctx.lineWidth=hov&&enabled?1.5:1;
+  roundRect(x,y,w,h,4); ctx.stroke();
+  // label
+  ctx.font='bold 13px Consolas,monospace';
+  ctx.fillStyle=enabled?(hov?'#eafffb':'#cfe8f2'):'rgba(100,115,128,0.6)';
+  ctx.fillText(label, x+14, y+8);
+  // desc
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle=enabled?'rgba(125,163,184,0.7)':'rgba(80,100,115,0.5)';
+  ctx.fillText(desc, x+14, y+26);
+  // registrar área clicável
+  hubBtnRects.push({key, x, y, w, h, enabled});
+}
+function drawHubFooter(pad){
+  const fy=cssH-52;
+  ctx.strokeStyle='rgba(111,227,210,0.18)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(pad,fy-10); ctx.lineTo(cssW-pad,fy-10); ctx.stroke();
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.font='11px Consolas,monospace';
+  ctx.fillStyle='rgba(160,180,195,0.75)';
+  ctx.fillText('HUB DE EXTRAÇÃO', pad, fy);
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.75)';
+  ctx.fillText('clique nos botões  ·  [ENTER] descer à mina  ·  [V] vender cristais  ·  [ESC] voltar ao título', pad, fy+16);
+  ctx.textAlign='right';
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(160,180,195,0.7)';
+  ctx.fillText(GAME_VERSION, cssW-pad, fy);
+  ctx.font='9px Consolas,monospace';
+  ctx.fillStyle='rgba(111,227,210,0.6)';
+  ctx.fillText('corridas seguras: '+bank.runsCompleted+'  ·  perdidas: '+bank.runsLost+'  ·  total ganho: '+bank.totalEarned.toLocaleString('pt-BR')+' cr', cssW-pad, fy+16);
+  ctx.textAlign='left';
+}
+
 /* telas */
 function drawScreens(){
   ctx.save();
   ctx.textAlign='center';
   if(state==='title'){
     drawMainMenu();
+  }
+  if(state==='hub'){
+    drawHub();
   }
   if(paused&&state==='play'){
     ctx.fillStyle='rgba(3,5,10,0.55)'; ctx.fillRect(0,0,cssW,cssH);
@@ -2242,11 +2698,17 @@ function drawScreens(){
     // C5: opções distintas
     ctx.font='bold 13px Consolas,monospace';
     ctx.fillStyle='rgba(255,210,150,'+bl.toFixed(2)+')';
-    ctx.fillText('[1] BATER RECORDE  (mesma semente)',cssW/2,cssH*0.4+138);
-    ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
-    ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.4+160);
+    if(isPersistentMode()){
+      ctx.fillText('[1] VOLTAR AO HUB  (mundo persiste)',cssW/2,cssH*0.4+138);
+      ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
+      ctx.fillText('[2] VOLTAR AO TÍTULO',cssW/2,cssH*0.4+160);
+    } else {
+      ctx.fillText('[1] BATER RECORDE  (mesma semente)',cssW/2,cssH*0.4+138);
+      ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
+      ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.4+160);
+    }
     ctx.font='10px Consolas,monospace'; ctx.fillStyle='#5d7689';
-    ctx.fillText('[R] reinício rápido   ·   [O] configurações',cssW/2,cssH*0.4+182);
+    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   PageUp console',cssW/2,cssH*0.4+182);
   }
   if(state==='win'){
     ctx.fillStyle='rgba(4,12,10,0.45)'; ctx.fillRect(0,0,cssW,cssH);
@@ -2260,12 +2722,19 @@ function drawScreens(){
     const bl=0.55+0.45*Math.sin(simFrames*0.1);
     // C5: opções distintas para restart
     ctx.font='bold 13px Consolas,monospace';
-    ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
-    ctx.fillText('[1] BATER RECORDE  (mesma semente)',cssW/2,cssH*0.38+138);
-    ctx.fillStyle='rgba(255,210,150,'+bl.toFixed(2)+')';
-    ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.38+160);
+    if(isPersistentMode()){
+      ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
+      ctx.fillText('[1] VOLTAR AO HUB  (bônus creditado)',cssW/2,cssH*0.38+138);
+      ctx.fillStyle='rgba(255,210,150,'+bl.toFixed(2)+')';
+      ctx.fillText('[2] VOLTAR AO TÍTULO',cssW/2,cssH*0.38+160);
+    } else {
+      ctx.fillStyle='rgba(160,255,220,'+bl.toFixed(2)+')';
+      ctx.fillText('[1] BATER RECORDE  (mesma semente)',cssW/2,cssH*0.38+138);
+      ctx.fillStyle='rgba(255,210,150,'+bl.toFixed(2)+')';
+      ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.38+160);
+    }
     ctx.font='10px Consolas,monospace'; ctx.fillStyle='#5d7689';
-    ctx.fillText('[R] reinício rápido   ·   [O] configurações',cssW/2,cssH*0.38+182);
+    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   PageUp console',cssW/2,cssH*0.38+182);
     if(Math.random()<0.08){
       const fx=cssW*0.2+Math.random()*cssW*0.6, fy=cssH*0.15+Math.random()*cssH*0.2;
       for(let k=0;k<20;k++){
@@ -2604,7 +3073,7 @@ addEventListener('keydown',e=>{
   if(e.repeat && !consoleOpen)return;
   // ===== CONSOLE: captura teclas quando aberto =====
   if(consoleOpen){
-    if(e.code==='Escape' || e.code==='Quote'){ consoleToggle(); return; }
+    if(e.code==='Escape' || e.code==='PageUp'){ consoleToggle(); return; }
     if(e.code==='Backspace'){ consoleInput = consoleInput.slice(0,-1); return; }
     if(e.code==='Enter'){
       const cmd = consoleInput;
@@ -2632,14 +3101,14 @@ addEventListener('keydown',e=>{
     }
     return;
   }
-  // tecla ' abre console
-  if(e.code==='Quote' && !e.ctrlKey && !e.altKey && !e.metaKey){
+  // tecla PageUp abre console
+  if(e.code==='PageUp' && !e.ctrlKey && !e.altKey && !e.metaKey){
     e.preventDefault();
     consoleToggle();
     return;
   }
-  // mod menu fecha com ' se estiver aberto
-  if(modMenuOpen && (e.code==='Escape' || e.code==='Quote')){
+  // mod menu fecha com ESC se estiver aberto
+  if(modMenuOpen && e.code==='Escape'){
     modMenuOpen = false;
     return;
   }
@@ -2661,7 +3130,15 @@ addEventListener('keydown',e=>{
       P.lastKeyTimes[e.code]=now;
     }
   }
-  if(state==='title'){
+  if(state==='hub'){
+    if(e.code==='Enter'||e.code==='Space'){ descendToMine(); }
+    else if(e.code==='KeyV'){
+      const earned = sellCrystals();
+      if(earned>0){ say('BASE', 'Vendido por '+earned.toLocaleString('pt-BR')+' créditos.'); saveGame(); }
+    }
+    else if(e.code==='Escape'){ state='title'; }
+  }
+  else if(state==='title'){
     if(e.code==='Enter'||e.code==='Space'){
       gameMode = menuSelectedMode;
       startRun(menuSelectedMode);
@@ -2695,10 +3172,16 @@ addEventListener('keydown',e=>{
     else if(e.code==='Digit3'){ menuSelectedMode='hardcore'; }
     else if(e.code==='Digit4'){ menuSelectedMode='daily'; }
   }
-  // C5: teclas 1 e 2 para reiniciar com mesma/nova semente em dead/win
+  // C5: teclas 1 e 2 para reiniciar
   else if((state==='dead'||state==='win')){
-    if(e.code==='Digit1') restart(true);     // bater recorde (mesma seed)
-    else if(e.code==='Digit2') restart(false);// explorar novas áreas (nova seed)
+    if(isPersistentMode()){
+      // Oil Era: [1] volta ao hub (perde runInventory se morto)
+      if(e.code==='Digit1'||e.code==='Enter') restart(true);
+      else if(e.code==='Digit2') { state='title'; }
+    } else {
+      if(e.code==='Digit1') restart(true);
+      else if(e.code==='Digit2') restart(false);
+    }
   }
 });
 addEventListener('keyup',e=>{ keys[e.code]=false; });
@@ -2712,6 +3195,16 @@ cv.addEventListener('mousemove',e=>{
     for(const r of modMenuRects){
       if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
         modMenuHovered = r.key;
+        break;
+      }
+    }
+  }
+  // hub hover
+  if(state==='hub' && !modMenuOpen){
+    hubHoveredBtn = null;
+    for(const r of hubBtnRects){
+      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+        hubHoveredBtn = r.key;
         break;
       }
     }
@@ -2741,7 +3234,30 @@ cv.addEventListener('click',e=>{
         break;
       }
     }
-    if(!hit) modMenuOpen = false;  // clicar fora fecha
+    if(!hit) modMenuOpen = false;
+    return;
+  }
+  // hub: clicar em botões
+  if(state==='hub'){
+    for(const r of hubBtnRects){
+      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+        if(!r.enabled) break;
+        if(r.key==='descer'){ descendToMine(); }
+        else if(r.key==='vender'){
+          const earned = sellCrystals();
+          if(earned>0){
+            say('BASE', 'Vendido por '+earned.toLocaleString('pt-BR')+' créditos.');
+            saveGame();
+          }
+        }
+        else {
+          // upgrade
+          const ok = buyUpgrade(r.key);
+          if(ok) say('BASE', UPGRADES[r.key].name + ' melhorado para nível ' + upgradeLevel(r.key) + '.');
+        }
+        break;
+      }
+    }
     return;
   }
   if(state!=='title') return;
@@ -2780,7 +3296,27 @@ document.addEventListener('visibilitychange',()=>{
 let state='title', paused=false, hitstop=0, timescale=1, slowmoT=0;
 function slowmo(ts,frames){ timescale=ts; slowmoT=frames; }
 function restart(sameSeed){
-  // C1: restart in-place sem reload de página
+  // Oil Era: em modo persistente, restart vai para o hub
+  if(isPersistentMode()){
+    // salva estado atual do mundo antes de voltar
+    saveGame();
+    // volta para hub
+    worms.length=0; bombs.length=0; pickups.length=0; texts.length=0; parts.length=0; confetti.length=0; msgs.length=0;
+    lights.length=0;
+    coreTaken=false; coreGone=false; tideY=1e9; tideOn=false; tideStart=-1;
+    paused=false; hitstop=0; timescale=1; slowmoT=0;
+    shake=0; dmgFlash=0; flashWhite=0;
+    beamSet(false); thrSet(0); growlSet(0); sfxAlarm(false);
+    const now = Date.now();
+    const dt = Math.max(0, (now - bank.lastSeen) / 1000);
+    simulateMarket(dt);
+    bank.lastSeen = now;
+    runInventory = {crystals:0, bombsFound:0, maxDepth:0, value:0};
+    state='hub';
+    camX=padX; camY=padY-30;
+    return;
+  }
+  // modo não-persistente: comportamento original
   if(sameSeed){
     // mantém SEED atual
   } else if(gameMode==='daily'){
@@ -2788,14 +3324,12 @@ function restart(sameSeed){
   } else {
     SEED = (Math.random()*1e9)>>>0;
   }
-  // atualiza URL sem recarregar
   try{
     const url=new URL(location.href);
     url.searchParams.set('seed',String(SEED));
     url.searchParams.set('mode',gameMode);
     history.replaceState(null,'',url);
   }catch(e){}
-  // reset completo do estado de jogo
   worms.length=0; bombs.length=0; pickups.length=0; texts.length=0; parts.length=0; confetti.length=0; msgs.length=0;
   lights.length=0;
   coreTaken=false; coreGone=false; tideY=1e9; tideOn=false; tideStart=-1;
@@ -2806,16 +3340,13 @@ function restart(sameSeed){
   resetStats();
   lastZone='';
   drawMini.done=false;
-  // regenera mundo (com mesma SEED se sameSeed=true)
   genWorld();
   placeBombCaches();
-  // posiciona player
-  P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=100; P.bombs=3; P.alive=true; P.deathCause='';
+  P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=P.maxHP||100; P.bombs=P.maxBombs||3; P.alive=true; P.deathCause='';
   P.thr=0; P.hurtCd=0; P.inLiq=0; P.aim=0;
-  P.stamina=100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
+  P.stamina=P.maxStamina||100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
   camX=padX; camY=padY-30;
   state='play';
-  // recria timeouts de tutorial (cancellation implícito por state check)
   setTimeout(()=>{ if(state==='play')say('BASE','Drone VL-7 online. O NÚCLEO está no fundo da crosta. Vá buscá-lo.'); },600);
   setTimeout(()=>{ if(state==='play')say('DRONE','Laser de mineração calibrado [BOTÃO ESQUERDO].'); },4200);
   setTimeout(()=>{ if(state==='play')say('DRONE','Bombas sísmicas armadas [ESPAÇO].'); },8200);
@@ -2823,12 +3354,9 @@ function restart(sameSeed){
 function startRun(mode){
   audioInit();
   if(AU.ctx&&AU.ctx.state==='suspended')AU.ctx.resume();
-  // C4: define modo e semente
   gameMode = mode || menuSelectedMode || gameMode || 'classic';
   if(gameMode==='daily') SEED = dailySeed();
-  else if(!Q.get('seed')) {
-    // semente aleatória já foi gerada no boot; mantém
-  }
+  applyUpgrades();
   // atualiza URL
   try{
     const url=new URL(location.href);
@@ -2836,7 +3364,31 @@ function startRun(mode){
     url.searchParams.set('seed',String(SEED));
     history.replaceState(null,'',url);
   }catch(e){}
-  // limpa estado de entidades anterior (já que não recarregamos a página)
+  // Oil Era: em modo persistente, vai para o hub (não para play)
+  if(isPersistentMode()){
+    // carrega save se existir
+    if(!worldSaved){
+      if(!loadGame()){
+        genWorld();
+        placeBombCaches();
+        saveGame();
+      } else {
+        placeBombCaches();
+      }
+    }
+    // simula mercado (passa tempo desde última visita)
+    const now = Date.now();
+    const dt = Math.max(0, (now - bank.lastSeen) / 1000);
+    simulateMarket(dt);
+    bank.lastSeen = now;
+    // reset inventário de corrida
+    runInventory = {crystals:0, bombsFound:0, maxDepth:0, value:0};
+    state='hub';
+    paused=false;
+    camX=padX; camY=padY-30;
+    return;
+  }
+  // modo não-persistente (hardcore/daily): comportamento original
   worms.length=0; bombs.length=0; pickups.length=0; texts.length=0; parts.length=0; confetti.length=0;
   lights.length=0;
   coreTaken=false; coreGone=false; tideY=1e9; tideOn=false; tideStart=-1;
@@ -2844,13 +3396,12 @@ function startRun(mode){
   paused=false; hitstop=0; timescale=1; slowmoT=0;
   shake=0; dmgFlash=0; flashWhite=0;
   beamSet(false); thrSet(0); growlSet(0); sfxAlarm(false);
-  // regenera mundo e caches DEPOIS de limpar (senão placeBombCaches é descartado)
   genWorld();
   placeBombCaches();
   state='play'; paused=false;
-  P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=100; P.bombs=3; P.alive=true; P.deathCause='';
+  P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=P.maxHP||100; P.bombs=P.maxBombs||3; P.alive=true; P.deathCause='';
   P.thr=0; P.hurtCd=0; P.inLiq=0; P.aim=0;
-  P.stamina=100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
+  P.stamina=P.maxStamina||100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
   resetStats();
   msgs=[];
   lastZone='';
@@ -2859,9 +3410,43 @@ function startRun(mode){
   setTimeout(()=>{ if(state==='play')say('DRONE','Laser de mineração calibrado [BOTÃO ESQUERDO].'); },4200);
   setTimeout(()=>{ if(state==='play')say('DRONE','Bombas sísmicas armadas [ESPAÇO].'); },8200);
 }
+// Oil Era: descer da superfície (hub) para a mina (play)
+function descendToMine(){
+  audioInit();
+  if(AU.ctx&&AU.ctx.state==='suspended')AU.ctx.resume();
+  // NÃO regenera mundo — já está carregado do save
+  worms.length=0; bombs.length=0; pickups.length=0; texts.length=0; parts.length=0; confetti.length=0;
+  lights.length=0;
+  coreTaken=false; coreGone=false; tideY=1e9; tideOn=false; tideStart=-1;
+  wormTimer=600;
+  paused=false; hitstop=0; timescale=1; slowmoT=0;
+  shake=0; dmgFlash=0; flashWhite=0;
+  beamSet(false); thrSet(0); growlSet(0); sfxAlarm(false);
+  // reset inventário de corrida
+  runInventory = {crystals:0, bombsFound:0, maxDepth:0, value:0};
+  // posiciona player no pad
+  P.x=padX; P.y=padY-9; P.vx=0; P.vy=0; P.hp=P.maxHP||100; P.bombs=P.maxBombs||3; P.alive=true; P.deathCause='';
+  P.thr=0; P.hurtCd=0; P.inLiq=0; P.aim=0;
+  P.stamina=P.maxStamina||100; P.boostActive=false; P.boostTimer=0; P.lastKeyTimes={};
+  resetStats();
+  msgs=[]; lastZone='';
+  state='play';
+  camX=padX; camY=padY-30;
+  MS={};
+  setTimeout(()=>{ if(state==='play')say('BASE','Drone VL-7 online. '+(gameMode==='fossa'?'Desça o máximo possível.':'O NÚCLEO está no fundo da crosta.')); },400);
+  setTimeout(()=>{ if(state==='play')say('DRONE','Cristais coletados vão para o inventário. Deposite no pad para preservá-los.'); },5000);
+}
 function stepGame(){
   simFrames++;
   stats.t+=1/60;
+  // Oil Era: simula mercado a cada 5s de jogo (300 frames)
+  if(isPersistentMode() && (simFrames%300)===0){
+    marketStep();
+  }
+  // Oil Era: autosave a cada 30s de jogo (1800 frames)
+  if(isPersistentMode() && (simFrames%1800)===0){
+    saveGame();
+  }
   if(state==='title'){
     // câmera passeia pela superfície
     camX=padX+Math.sin(simFrames*0.0035)*120;
@@ -2910,7 +3495,7 @@ function stepGame(){
 }
 function updateCursor(){
   document.body.classList.toggle('playing', state==='play' && !paused);
-  document.body.classList.toggle('menu-active', state==='title');
+  document.body.classList.toggle('menu-active', state==='title' || state==='hub');
 }
 function render(){
   lights.length=Math.min(lights.length,40);
@@ -2981,11 +3566,19 @@ function frame(now){
 /* ---------------- boot ---------------- */
 function boot(){
   bindSettingsOverlay();
-  // se veio ?mode= na URL, aplica
   const qm=Q.get('mode');
   if(qm && MODE_INFO[qm]) gameMode=qm;
-  genWorld();
-  placeBombCaches();
+  applyUpgrades();
+  // Oil Era: tenta carregar save (modo persistente)
+  if(isPersistentMode() && loadGame()){
+    // mundo carregado do save
+    placeBombCaches();  // reposiciona caches (não são persistidos)
+  } else {
+    // sem save ou modo não-persistente: gera mundo novo
+    genWorld();
+    placeBombCaches();
+    if(isPersistentMode()) saveGame();  // salva mundo inicial
+  }
   resize();
   camX=padX; camY=padY-30;
   if(Q.get('autostart')==='1'){
