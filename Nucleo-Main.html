@@ -989,6 +989,12 @@ function applyUpgrades(){
   P.moveSpeedMul = 1 + upgradeLevel('moveSpeed') * 0.15;
   P.lightRadiusMul = 1 + upgradeLevel('lightRadius') * 0.20;
   P.drillPowerMul = 1 + upgradeLevel('drillPower') * 0.25;
+  // aplica efeitos de pesquisa (cumulativo)
+  if(isResearched('reinforced')) P.maxHP += 30;
+  if(isResearched('drillTech')) P.drillPowerMul *= 1.5;
+  if(isResearched('thermals')) P.lightRadiusMul *= 1.3;
+  // garante que HP não excede maxHP
+  if(P.hp > P.maxHP) P.hp = P.maxHP;
 }
 // RLE compression para Uint8Array
 function rleEncode(arr){
@@ -1031,6 +1037,7 @@ function saveGame(){
     return true;
   }catch(e){ console.error('save failed', e); return false; }
 }
+// (bank.bases e bank.research são salvos dentro de bank automaticamente)
 function loadGame(){
   try{
     const raw = localStorage.getItem(saveKey());
@@ -1047,6 +1054,8 @@ function loadGame(){
     bank = Object.assign(bank, save.bank || {});
     if(!bank.priceHistory) bank.priceHistory = [];
     if(!bank.upgrades) bank.upgrades = {};
+    if(!bank.bases) bank.bases = [];
+    if(!bank.research) bank.research = {};
     // simula mercado offline
     const now = Date.now();
     const dtSec = Math.max(0, (now - (save.timestamp || now)) / 1000);
@@ -1108,6 +1117,186 @@ function sellCrystals(n){
 function hasSave(){
   try{ return !!localStorage.getItem(saveKey()); }catch(e){ return false; }
 }
+/* ===== Gestão de seed ===== */
+let confirmNewSeed = false;  // true = mostra modal de confirmação
+function generateNewSeed(){
+  // limpa save atual
+  try{ localStorage.removeItem(saveKey()); }catch(e){}
+  worldSaved = false;
+  SEED = (Math.random()*1e9)>>>0;
+  // reset bank (mantém dinheiro e upgrades? Não — nova seed = nova mina, reset total)
+  bank = {
+    money: 0, crystals: 0, price: 50, priceTrend: 0, priceHistory: [],
+    coreExtracted: false, totalEarned: 0, runsCompleted: 0, runsLost: 0,
+    upgrades: {}, lastSeen: Date.now(),
+    bases: [],  // bases construídas
+    research: {},  // pesquisa desbloqueada
+  };
+  // gera mundo novo
+  genWorld();
+  placeBombCaches();
+  placeBaseSlots();
+  saveGame();
+  applyUpgrades();
+  // atualiza URL
+  try{
+    const url=new URL(location.href);
+    url.searchParams.set('seed',String(SEED));
+    history.replaceState(null,'',url);
+  }catch(e){}
+  say('BASE','Nova semente gerada: '+SEED+'. Mundo anterior descartado.');
+}
+/* ===== Sistema de bases (estilo Tiny Space Program) ===== */
+const BASE_SLOTS = [
+  {depth: 100, name: 'Posto Avançado Alpha',  cost: 50},
+  {depth: 300, name: 'Refinaria Beta',         cost: 200},
+  {depth: 600, name: 'Estação Gamma',          cost: 800},
+  {depth: 900, name: 'Plataforma Delta',       cost: 2500},
+];
+const BASE_LEVELS = [
+  {name:'NÍVEL 1', cost:0,    desc:'Cura + reabastecimento de bombas ao passar'},
+  {name:'NÍVEL 2', cost:100,  desc:'Teleporte entre bases (tecla T)'},
+  {name:'NÍVEL 3', cost:400,  desc:'Extrator automático: +1 cristal/min'},
+];
+function placeBaseSlots(){
+  // marca slots de base em profundidades fixas — apenas inicializa o estado
+  // as bases só aparecem quando construídas
+  if(!bank.bases) bank.bases = [];
+  // não cria nada aqui — slots são virtuais (definidos por BASE_SLOTS)
+}
+function getBaseAtDepth(depth){
+  for(const slot of BASE_SLOTS){
+    if(Math.abs(depth - slot.depth) < 20) return slot;
+  }
+  return null;
+}
+function findBuiltBase(depth){
+  if(!bank.bases) return null;
+  for(const b of bank.bases){
+    if(Math.abs(depth - b.depth) < 20) return b;
+  }
+  return null;
+}
+function buildBase(slot){
+  if(bank.crystals < slot.cost) return false;
+  if(!bank.bases) bank.bases = [];
+  if(findBuiltBase(slot.depth)) return false;
+  bank.crystals -= slot.cost;
+  bank.bases.push({depth: slot.depth, name: slot.name, level: 1, x: padX, lastExtract: Date.now()});
+  saveGame();
+  say('BASE', slot.name + ' construída em ' + slot.depth + 'm.');
+  return true;
+}
+function upgradeBase(base){
+  if(base.level >= 3) return false;
+  const nextLevel = BASE_LEVELS[base.level];  // level 1 -> index 1 (custo 100)
+  if(bank.crystals < nextLevel.cost) return false;
+  bank.crystals -= nextLevel.cost;
+  base.level++;
+  saveGame();
+  say('BASE', base.name + ' evoluída para ' + BASE_LEVELS[base.level-1].name + '.');
+  return true;
+}
+function stepBases(){
+  if(!isPersistentMode() || !bank.bases) return;
+  // extrator automático (nível 3): +1 cristal/min
+  for(const b of bank.bases){
+    if(b.level >= 3){
+      const now = Date.now();
+      if(!b.lastExtract) b.lastExtract = now;
+      const elapsed = now - b.lastExtract;
+      if(elapsed >= 60000){  // 1 min
+        const generated = Math.floor(elapsed / 60000);
+        bank.crystals += generated;
+        b.lastExtract += generated * 60000;
+        if(state==='play' && generated>0){
+          addText(P.x, P.y-12, '+'+generated+' auto-extractor', '#8ff5e8');
+        }
+      }
+    }
+  }
+  // cura + reabastecimento ao passar por base
+  if(state==='play' && P.alive){
+    const playerDepth = (P.y - padY) | 0;
+    const base = findBuiltBase(playerDepth);
+    if(base && Math.abs(P.x - padX) < 30){
+      if(P.hp < P.maxHP){
+        P.hp = Math.min(P.maxHP, P.hp + 0.3);
+      }
+      if(P.bombs < P.maxBombs){
+        P.bombs = P.maxBombs;
+      }
+      // teleport entre bases (nível 2+): tecla T
+      // (tratado no keydown)
+    }
+  }
+}
+function teleportToBase(){
+  if(!bank.bases || bank.bases.length===0) return;
+  // encontra próxima base (em direção ao fundo)
+  const playerDepth = (P.y - padY) | 0;
+  let target = null;
+  let minDist = 1e9;
+  for(const b of bank.bases){
+    if(b.level < 2) continue;
+    const d = Math.abs(b.depth - playerDepth);
+    if(d > 20 && d < minDist){
+      minDist = d;
+      target = b;
+    }
+  }
+  if(target){
+    P.x = target.x || padX;
+    P.y = padY + target.depth;
+    // cava espaço ao redor se necessário
+    digCircle(P.x, P.y, 6, {debris:0});
+    camX = P.x; camY = P.y;
+    addText(P.x, P.y-10, 'teleport: '+target.name, '#9ad9ff');
+    say('DRONE', 'Teleporte para ' + target.name + '.');
+  }
+}
+/* ===== Árvore de pesquisa ===== */
+const RESEARCH = {
+  drillTech:   {name:'PERFURAÇÃO OTIMIZADA', desc:'+50% velocidade do laser', cost:100, requires:[]},
+  reinforced:  {name:'CASCO REFORÇADO', desc:'+30 HP máximo', cost:150, requires:[]},
+  efficiency:  {name:'EFICIÊNCIA ENERGÉTICA', desc:'-50% dreno de estamina do boost', cost:120, requires:[]},
+  scanner:     {name:'SCANNER DE CRISTAIS', desc:'destaca cristais próximos no minimapa', cost:80, requires:[]},
+  thermals:    {name:'VISÃO TÉRMICA', desc:'+30% raio de luz em profundidade', cost:200, requires:['drillTech']},
+  autoRepair:  {name:'AUTORREPARO', desc:'+0.5 HP/s passivamente', cost:300, requires:['reinforced']},
+};
+function isResearched(key){ return !!(bank.research && bank.research[key]); }
+function canResearch(key){
+  const r = RESEARCH[key];
+  if(!r) return false;
+  if(isResearched(key)) return false;
+  for(const req of r.requires){
+    if(!isResearched(req)) return false;
+  }
+  return bank.crystals >= r.cost;
+}
+function doResearch(key){
+  if(!canResearch(key)) return false;
+  const r = RESEARCH[key];
+  bank.crystals -= r.cost;
+  if(!bank.research) bank.research = {};
+  bank.research[key] = true;
+  applyResearch();
+  saveGame();
+  say('BASE', 'Pesquisa concluída: ' + r.name + '.');
+  return true;
+}
+function applyResearch(){
+  // aplica efeitos de pesquisa
+  // drillTech: +50% drillPowerMul
+  // reinforced: +30 maxHP
+  // efficiency: -50% stamina drain (drain *= 0.5)
+  // thermals: +30% lightRadiusMul em profundidade
+  // autoRepair: +0.5 HP/s
+  // (efeitos aplicados em stepPlayer)
+}
+let researchOpen = false;
+let researchRects = [];
+let researchHovered = null;
 function addLight(x,y,r,p){ lights.push({x,y,r,p}); }
 function addText(x,y,s,c){ texts.push({x,y,s,c,life:90}); }
 
@@ -1148,17 +1337,24 @@ function stepPlayer(){
   const up=keys.KeyW||keys.ArrowUp, dn=keys.KeyS||keys.ArrowDown, lf=keys.KeyA||keys.ArrowLeft, rt=keys.KeyD||keys.ArrowRight;
   // boost pós-núcleo (mantido)
   const coreBoost=coreTaken?1.45:1;
-  // estamina/boost por duplo clique: 2x por ~1.2s, drena 40/s, regen 18/s
-  if(P.boostTimer>0){ P.boostTimer-=1/60; if(P.boostTimer<=0){ P.boostActive=false; P.boostTimer=0; } }
+  // estamina/boost: segurar Shift ativa boost (2x velocidade, drena 40/s, regen 18/s)
+  const shiftHeld = keys.ShiftLeft || keys.ShiftRight;
+  if(shiftHeld && P.stamina>5 && (up||dn||lf||rt)){
+    P.boostActive = true;
+  } else if(P.stamina<=0 || !shiftHeld){
+    P.boostActive = false;
+  }
   if(P.boostActive){
-    P.stamina = Math.max(0, P.stamina - 40/60);
-    if(P.stamina<=0){ P.boostActive=false; P.boostTimer=0; }
+    const drain = isResearched('efficiency') ? 20/60 : 40/60;
+    P.stamina = Math.max(0, P.stamina - drain);
+    if(P.stamina<=0) P.boostActive=false;
   } else {
-    P.stamina = Math.min(100, P.stamina + 18/60);
+    P.stamina = Math.min(P.maxStamina||100, P.stamina + 18/60);
   }
   const staminaBoost = P.boostActive ? 2.0 : 1.0;
   const boost = coreBoost * staminaBoost;
   // V2: velocidade base reduzida pela metade (ax 0.11/0.16/0.10)
+  // pesquisa drillTech não afeta movimento, mas afeta laser (em stepBeam)
   let ax=0,ay=0;
   if(lf)ax-=0.11; if(rt)ax+=0.11;
   if(up)ay-=0.16; if(dn)ay+=0.10;
@@ -1726,6 +1922,74 @@ function w2sy(wy){ return (wy-(renderWorld.vy0+renderWorld.fy))*SCALE; }
 
 function drawEntities(){
   const S=SCALE;
+  // bases persistentes (Oil Era)
+  if(isPersistentMode() && bank.bases){
+    for(const b of bank.bases){
+      const bx = b.x || padX;
+      const by = padY + b.depth;
+      const x = w2sx(bx), y = w2sy(by);
+      if(x<-60||x>cssW+60||y<-60||y>cssH+60) continue;
+      // plataforma da base
+      ctx.save();
+      const pulse = 0.7 + 0.3*Math.sin(simFrames*0.05 + b.depth*0.01);
+      // glow
+      ctx.globalCompositeOperation='lighter';
+      ctx.fillStyle='rgba(111,227,210,'+(0.15*pulse).toFixed(2)+')';
+      ctx.beginPath(); ctx.arc(x, y, 30, 0, 7); ctx.fill();
+      ctx.restore();
+      // estrutura
+      ctx.fillStyle='#3a4a55';
+      ctx.fillRect(x-12, y-4, 24, 8);
+      ctx.fillStyle='#6fe3d2';
+      ctx.fillRect(x-12, y-4, 24, 2);
+      // painel central com nível
+      ctx.fillStyle='rgba(15,30,38,0.9)';
+      ctx.fillRect(x-8, y-2, 16, 4);
+      ctx.font='bold 7px Consolas,monospace';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillStyle='#6fe3d2';
+      ctx.fillText('L'+b.level, x, y);
+      ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+      // luz
+      addLight(bx, by, 20+b.level*5, 120+b.level*20);
+      // indicador de nome quando próximo
+      if(P.alive && Math.abs(P.x-bx)<60 && Math.abs(P.y-by)<60){
+        ctx.font='9px Consolas,monospace';
+        ctx.textAlign='center';
+        ctx.fillStyle='rgba(111,227,210,0.85)';
+        ctx.shadowColor='#6fe3d2'; ctx.shadowBlur=6;
+        ctx.fillText(b.name+' [L'+b.level+']', x, y-12);
+        ctx.shadowBlur=0;
+        ctx.textAlign='left';
+      }
+    }
+  }
+  // slots de base não construídos (mostra quando próximo)
+  if(isPersistentMode() && state==='play'){
+    for(const slot of BASE_SLOTS){
+      if(findBuiltBase(slot.depth)) continue;
+      const by = padY + slot.depth;
+      const x = w2sx(padX), y = w2sy(by);
+      if(x<-60||x>cssW+60||y<-60||y>cssH+60) continue;
+      // mostra slot apenas se player está perto
+      if(P.alive && Math.abs(P.y - by) < 100){
+        const pulse = 0.4 + 0.6*Math.sin(simFrames*0.08);
+        ctx.save();
+        ctx.globalAlpha = pulse;
+        ctx.strokeStyle='#ffae4a';
+        ctx.lineWidth=1;
+        ctx.setLineDash([3,3]);
+        ctx.strokeRect(x-12, y-4, 24, 8);
+        ctx.setLineDash([]);
+        ctx.font='8px Consolas,monospace';
+        ctx.textAlign='center';
+        ctx.fillStyle='rgba(255,174,74,0.85)';
+        ctx.fillText('['+slot.cost+' cristais] [B] construir', x, y-10);
+        ctx.textAlign='left';
+        ctx.restore();
+      }
+    }
+  }
   // coletáveis
   for(const p of pickups){
     const x=w2sx(p.x),y=w2sy(p.y);
@@ -1997,11 +2261,38 @@ function drawHud(){
     ctx.fillStyle='#ff5030';
     ctx.fillRect(rx-8,ry0+(ry1-ry0)*td,16,2);
   }
-  // zona atual
+  // zona atual + indicador de base
   ctx.textAlign='right'; ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(190,215,230,0.75)';
   const depth=Math.max(0,(P.y-padY)|0);
   ctx.fillText(zoneName(depth)+' — '+depth+'m',cssW-40,16);
+  // Oil Era: prompt de base próxima
+  if(isPersistentMode() && state==='play' && P.alive){
+    const slot = getBaseAtDepth(depth);
+    const built = slot ? findBuiltBase(slot.depth) : null;
+    if(slot && Math.abs(P.x-padX)<30){
+      ctx.font='bold 11px Consolas,monospace';
+      if(built){
+        if(built.level < 3){
+          const nextLvl = BASE_LEVELS[built.level];
+          const canUp = bank.crystals >= nextLvl.cost;
+          ctx.fillStyle = canUp ? '#9ad9ff' : '#5d7689';
+          ctx.fillText('['+built.name+'] [U] evoluir ('+nextLvl.cost+' cristais)', cssW-40, 42);
+        } else {
+          ctx.fillStyle='#5d7689';
+          ctx.fillText('['+built.name+'] MAXIMIZADA', cssW-40, 42);
+        }
+        if(built.level >= 2){
+          ctx.fillStyle='#9ad9ff';
+          ctx.fillText('[T] teleportar para próxima base', cssW-40, 56);
+        }
+      } else {
+        const canBuild = bank.crystals >= slot.cost;
+        ctx.fillStyle = canBuild ? '#ffae4a' : '#5d7689';
+        ctx.fillText('['+slot.name+'] [B] construir ('+slot.cost+' cristais)', cssW-40, 42);
+      }
+    }
+  }
   // C6: comparação com recorde
   if(best.depth>0){
     const diff = depth - best.depth;
@@ -2441,7 +2732,7 @@ function drawMenuFooter(pad){
   ctx.fillText('CONTROLES', pad, fy);
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(125,163,184,0.75)';
-  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  DUPLO-CLIQUE boost  ·  P pausa  ·  M mudo  ·  O config  ·  PageUp console', pad, fy+16);
+  ctx.fillText('WASD/SETAS mover  ·  MOUSE mirar  ·  CLIQUE-ESQ laser  ·  ESPAÇO/CLIQUE-DIR bomba  ·  SHIFT boost  ·  P pausa  ·  M mudo  ·  O config  ·  PageUp console', pad, fy+16);
   // versão (direita)
   ctx.textAlign='right';
   ctx.font='10px Consolas,monospace';
@@ -2453,6 +2744,166 @@ function drawMenuFooter(pad){
   ctx.textAlign='left';
 }
 
+/* ===== Painel de Pesquisa (Tiny Space Program style) ===== */
+let confirmRects = [];
+function drawResearchPanel(){
+  if(!researchOpen || state!=='hub') return;
+  researchRects = [];
+  // overlay
+  ctx.fillStyle='rgba(2,4,8,0.7)';
+  ctx.fillRect(0,0,cssW,cssH);
+  // painel central
+  const pw = Math.min(560, cssW-80);
+  const ph = Math.min(540, cssH-80);
+  const px = (cssW-pw)/2;
+  const py = (cssH-ph)/2;
+  // fundo
+  let g=ctx.createLinearGradient(px,py,px,py+ph);
+  g.addColorStop(0,'rgba(15,30,38,0.97)');
+  g.addColorStop(1,'rgba(8,16,22,0.97)');
+  ctx.fillStyle=g;
+  roundRect(px,py,pw,ph,8); ctx.fill();
+  ctx.strokeStyle='#9ad9ff'; ctx.lineWidth=1.5;
+  roundRect(px,py,pw,ph,8); ctx.stroke();
+  // header
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold 16px Consolas,monospace';
+  ctx.fillStyle='#9ad9ff';
+  ctx.shadowColor='#9ad9ff'; ctx.shadowBlur=10;
+  ctx.fillText('▮ ÁRVORE DE PESQUISA', px+pw/2, py+16);
+  ctx.shadowBlur=0;
+  ctx.font='10px Consolas,monospace';
+  ctx.fillStyle='rgba(125,163,184,0.7)';
+  ctx.fillText('gasta cristais (não créditos)  ·  persistente nesta seed', px+pw/2, py+38);
+  // saldo de cristais
+  ctx.font='bold 12px Consolas,monospace';
+  ctx.fillStyle='#8ff5e8';
+  ctx.fillText('cristais disponíveis: '+bank.crystals, px+pw/2, py+58);
+  // lista de pesquisas
+  let ry = py + 84;
+  for(const key in RESEARCH){
+    const r = RESEARCH[key];
+    const done = isResearched(key);
+    const can = canResearch(key);
+    const hov = researchHovered === key;
+    const rowH = 56;
+    // fundo
+    ctx.fillStyle = done ? 'rgba(111,227,210,0.18)' : (can ? (hov?'rgba(154,217,255,0.18)':'rgba(154,217,255,0.08)') : 'rgba(20,30,40,0.4)');
+    roundRect(px+20, ry, pw-40, rowH-8, 4); ctx.fill();
+    ctx.strokeStyle = done ? '#6fe3d2' : (can ? (hov?'#9ad9ff':'rgba(154,217,255,0.4)') : 'rgba(40,60,72,0.4)');
+    ctx.lineWidth = done ? 1.5 : 1;
+    roundRect(px+20, ry, pw-40, rowH-8, 4); ctx.stroke();
+    // label
+    ctx.textAlign='left';
+    ctx.font='bold 13px Consolas,monospace';
+    ctx.fillStyle = done ? '#6fe3d2' : (can ? '#cfe8f2' : 'rgba(100,115,128,0.7)');
+    const prefix = done ? '✓ ' : (can ? '▸ ' : '✗ ');
+    ctx.fillText(prefix + r.name, px+36, ry+10);
+    // desc
+    ctx.font='10px Consolas,monospace';
+    ctx.fillStyle = done ? 'rgba(111,227,210,0.7)' : 'rgba(125,163,184,0.7)';
+    ctx.fillText(r.desc, px+36, ry+28);
+    // custo / status
+    ctx.textAlign='right';
+    ctx.font='bold 11px Consolas,monospace';
+    if(done){
+      ctx.fillStyle='#6fe3d2';
+      ctx.fillText('CONCLUÍDO', px+pw-36, ry+22);
+    } else {
+      // requisitos
+      const reqs = r.requires.map(k => isResearched(k) ? '✓' : '✗ '+RESEARCH[k].name).join(' ');
+      ctx.font='9px Consolas,monospace';
+      ctx.fillStyle = r.requires.length===0 || r.requires.every(k=>isResearched(k)) ? 'rgba(111,227,210,0.5)' : '#ff6a50';
+      if(r.requires.length>0) ctx.fillText('req: '+reqs, px+pw-36, ry+8);
+      ctx.font='bold 11px Consolas,monospace';
+      ctx.fillStyle = can ? '#8ff5e8' : 'rgba(100,115,128,0.6)';
+      ctx.fillText(r.cost+' cristais', px+pw-36, ry+26);
+    }
+    ctx.textAlign='left';
+    // registrar área clicável (se pode pesquisar)
+    if(!done && can){
+      researchRects.push({key, x:px+20, y:ry, w:pw-40, h:rowH-8});
+    }
+    ry += rowH;
+  }
+  // botão fechar
+  const closeY = py + ph - 36;
+  const closeW = 120;
+  const closeX = px + (pw-closeW)/2;
+  const closeHov = researchHovered === 'close';
+  ctx.fillStyle = closeHov ? 'rgba(154,217,255,0.3)' : 'rgba(20,30,40,0.6)';
+  roundRect(closeX, closeY, closeW, 26, 4); ctx.fill();
+  ctx.strokeStyle = closeHov ? '#9ad9ff' : 'rgba(154,217,255,0.4)';
+  ctx.lineWidth=1;
+  roundRect(closeX, closeY, closeW, 26, 4); ctx.stroke();
+  ctx.font='bold 11px Consolas,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle = closeHov ? '#eafffb' : '#9ad9ff';
+  ctx.fillText('FECHAR [R]', closeX+closeW/2, closeY+13);
+  ctx.textBaseline='alphabetic';
+  researchRects.push({key:'close', x:closeX, y:closeY, w:closeW, h:26});
+}
+function drawConfirmNewSeed(){
+  if(!confirmNewSeed || state!=='hub') return;
+  confirmRects = [];
+  // overlay
+  ctx.fillStyle='rgba(2,4,8,0.8)';
+  ctx.fillRect(0,0,cssW,cssH);
+  // painel central
+  const pw = Math.min(440, cssW-80);
+  const ph = 200;
+  const px = (cssW-pw)/2;
+  const py = (cssH-ph)/2;
+  let g=ctx.createLinearGradient(px,py,px,py+ph);
+  g.addColorStop(0,'rgba(40,15,15,0.97)');
+  g.addColorStop(1,'rgba(20,8,8,0.97)');
+  ctx.fillStyle=g;
+  roundRect(px,py,pw,ph,8); ctx.fill();
+  ctx.strokeStyle='#ff6a50'; ctx.lineWidth=2;
+  roundRect(px,py,pw,ph,8); ctx.stroke();
+  // header
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold 16px Consolas,monospace';
+  ctx.fillStyle='#ff6a50';
+  ctx.shadowColor='#ff6a50'; ctx.shadowBlur=10;
+  ctx.fillText('⚠ GERAR NOVA SEED', px+pw/2, py+20);
+  ctx.shadowBlur=0;
+  // texto
+  ctx.font='12px Consolas,monospace';
+  ctx.fillStyle='#cfe8f2';
+  ctx.fillText('Isso vai descartar o mundo atual permanentemente.', px+pw/2, py+56);
+  ctx.fillText('Túneis cavados, bases construídas, cristais no estoque,', px+pw/2, py+76);
+  ctx.fillText('pesquisas e upgrades serão perdidos.', px+pw/2, py+96);
+  ctx.font='bold 11px Consolas,monospace';
+  ctx.fillStyle='#ffae4a';
+  ctx.fillText('Saldo atual: '+bank.money+' cr  ·  '+bank.crystals+' cristais', px+pw/2, py+122);
+  // botões
+  const btnY = py + ph - 50;
+  const btnW = 140;
+  const btnH = 32;
+  const btnGap = 20;
+  const btn1X = px + (pw - btnW*2 - btnGap)/2;
+  const btn2X = btn1X + btnW + btnGap;
+  // SIM
+  ctx.fillStyle='rgba(255,106,80,0.3)';
+  roundRect(btn1X, btnY, btnW, btnH, 4); ctx.fill();
+  ctx.strokeStyle='#ff6a50'; ctx.lineWidth=1.5;
+  roundRect(btn1X, btnY, btnW, btnH, 4); ctx.stroke();
+  ctx.font='bold 13px Consolas,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle='#ff6a50';
+  ctx.fillText('SIM, GERAR NOVA', btn1X+btnW/2, btnY+btnH/2);
+  confirmRects.push({action:'yes', x:btn1X, y:btnY, w:btnW, h:btnH});
+  // NÃO
+  ctx.fillStyle='rgba(111,227,210,0.2)';
+  roundRect(btn2X, btnY, btnW, btnH, 4); ctx.fill();
+  ctx.strokeStyle='#6fe3d2'; ctx.lineWidth=1.5;
+  roundRect(btn2X, btnY, btnW, btnH, 4); ctx.stroke();
+  ctx.fillStyle='#6fe3d2';
+  ctx.fillText('NÃO, CANCELAR', btn2X+btnW/2, btnY+btnH/2);
+  confirmRects.push({action:'no', x:btn2X, y:btnY, w:btnW, h:btnH});
+  ctx.textBaseline='alphabetic';
+}
 /* ===== Hub de Extração (Oil Era) ===== */
 let hubBtnRects = [];
 let hubHoveredBtn = null;
@@ -2512,7 +2963,7 @@ function drawHubBrand(x,y,w){
   ctx.fillText('Colônia Kepler-442  ·  Semente '+SEED, x, y+96);
   // painel de stats
   const sy=y+130;
-  const sh=320;
+  const sh=400;
   let pg=ctx.createLinearGradient(x,sy,x,sy+sh);
   pg.addColorStop(0,'rgba(15,30,38,0.6)'); pg.addColorStop(1,'rgba(8,16,22,0.4)');
   ctx.fillStyle=pg;
@@ -2584,6 +3035,16 @@ function drawHubBrand(x,y,w){
   ctx.font='9px Consolas,monospace';
   ctx.fillStyle=bank.coreExtracted?'#ffae4a':'rgba(80,100,115,0.6)';
   ctx.fillText('NÚCLEO: '+(bank.coreExtracted?'★ EXTRAÍDO':'ainda não extraído'), x+16, yy);
+  // bases construídas
+  yy+=16;
+  const basesCount = bank.bases ? bank.bases.length : 0;
+  ctx.fillStyle=basesCount>0?'#9ad9ff':'rgba(80,100,115,0.6)';
+  ctx.fillText('BASES: '+basesCount+'/'+BASE_SLOTS.length+' construídas', x+16, yy);
+  // pesquisas
+  yy+=16;
+  const resCount = bank.research ? Object.keys(bank.research).filter(k=>bank.research[k]).length : 0;
+  ctx.fillStyle=resCount>0?'#9ad9ff':'rgba(80,100,115,0.6)';
+  ctx.fillText('PESQUISAS: '+resCount+'/'+Object.keys(RESEARCH).length+' concluídas', x+16, yy);
   ctx.textBaseline='alphabetic';
 }
 function drawHubActions(x,y,w){
@@ -2595,16 +3056,23 @@ function drawHubActions(x,y,w){
   hubBtnRects = [];
   // botão DESCER À MINA (principal)
   let by=y+28;
-  drawHubButton(x,by,w,64,'descer','DESCER À MINA','Inicia corrida. Mundo persiste entre sessões.', '#6fe3d2', true);
-  by+=80;
+  drawHubButton(x,by,w,56,'descer','DESCER À MINA','Mundo persiste. Cristais vão para inventário.', '#6fe3d2', true);
+  by+=68;
   // botão VENDER CRISTAIS
   const sellVal = bank.crystals * bank.price;
-  drawHubButton(x,by,w,56,'vender','VENDER '+bank.crystals+' CRISTAIS','Recebe '+sellVal.toLocaleString('pt-BR')+' cr @ '+bank.price.toFixed(0)+'/un', '#ffd27f', bank.crystals>0);
-  by+=72;
-  // seção upgrades (Fase 3 - preview)
+  drawHubButton(x,by,w,48,'vender','VENDER '+bank.crystals+' CRISTAIS',sellVal.toLocaleString('pt-BR')+' cr @ '+bank.price.toFixed(0)+'/un', '#ffd27f', bank.crystals>0);
+  by+=60;
+  // botão PESQUISA
+  const researchedCount = bank.research ? Object.keys(bank.research).filter(k=>bank.research[k]).length : 0;
+  drawHubButton(x,by,w,48,'pesquisa','PESQUISA ['+researchedCount+'/'+Object.keys(RESEARCH).length+']','Gasta cristais para desbloquear tecnologias', '#9ad9ff', true);
+  by+=60;
+  // botão GERAR NOVA SEED
+  drawHubButton(x,by,w,44,'newseed','GERAR NOVA SEED','Descarta mundo atual. Saldo e upgrades são resetados.', '#ff6a50', true);
+  by+=56;
+  // seção upgrades permanentes (comprados com dinheiro)
   ctx.font='bold 10px Consolas,monospace';
   ctx.fillStyle='rgba(111,227,210,0.5)';
-  ctx.fillText('▾ UPGRADES PERMANENTES', x, by);
+  ctx.fillText('▾ UPGRADES (créditos)', x, by);
   by+=20;
   for(const key in UPGRADES){
     const u=UPGRADES[key];
@@ -2612,9 +3080,9 @@ function drawHubActions(x,y,w){
     const cost=upgradeCost(key);
     const canAfford=cost>0 && bank.money>=cost;
     const label=u.name+' ['+lvl+'/'+u.maxLevel+']';
-    const desc=cost<0?'MAXIMIZADO':(canAfford?u.desc+' ('+cost+' cr)':''+cost+' cr — créditos insuficientes');
-    drawHubButton(x,by,w,44,key,label,desc, canAfford?'#9ad9ff':'#5a6e85', canAfford);
-    by+=52;
+    const desc=cost<0?'MAXIMIZADO':(canAfford?u.desc+' ('+cost+' cr)':''+cost+' cr — insuficiente');
+    drawHubButton(x,by,w,40,key,label,desc, canAfford?'#9ad9ff':'#5a6e85', canAfford);
+    by+=48;
   }
 }
 function drawHubButton(x,y,w,h,key,label,desc,color,enabled){
@@ -2657,7 +3125,7 @@ function drawHubFooter(pad){
   ctx.fillText('HUB DE EXTRAÇÃO', pad, fy);
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(125,163,184,0.75)';
-  ctx.fillText('clique nos botões  ·  [ENTER] descer à mina  ·  [V] vender cristais  ·  [ESC] voltar ao título', pad, fy+16);
+  ctx.fillText('clique nos botões  ·  [ENTER] descer  ·  [V] vender  ·  [R] pesquisa  ·  [N] nova seed  ·  [ESC] título', pad, fy+16);
   ctx.textAlign='right';
   ctx.font='10px Consolas,monospace';
   ctx.fillStyle='rgba(160,180,195,0.7)';
@@ -2708,7 +3176,7 @@ function drawScreens(){
       ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.4+160);
     }
     ctx.font='10px Consolas,monospace'; ctx.fillStyle='#5d7689';
-    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   PageUp console',cssW/2,cssH*0.4+182);
+    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   [PageUp] console   ·   [SHIFT] boost',cssW/2,cssH*0.4+182);
   }
   if(state==='win'){
     ctx.fillStyle='rgba(4,12,10,0.45)'; ctx.fillRect(0,0,cssW,cssH);
@@ -2734,7 +3202,7 @@ function drawScreens(){
       ctx.fillText('[2] EXPLORAR NOVAS ÁREAS  (nova semente)',cssW/2,cssH*0.38+160);
     }
     ctx.font='10px Consolas,monospace'; ctx.fillStyle='#5d7689';
-    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   PageUp console',cssW/2,cssH*0.38+182);
+    ctx.fillText('[R] reinício rápido   ·   [O] configurações   ·   [PageUp] console   ·   [SHIFT] boost',cssW/2,cssH*0.38+182);
     if(Math.random()<0.08){
       const fx=cssW*0.2+Math.random()*cssW*0.6, fy=cssH*0.15+Math.random()*cssH*0.2;
       for(let k=0;k<20;k++){
@@ -3115,28 +3583,48 @@ addEventListener('keydown',e=>{
   if(e.repeat)return;
   keys[e.code]=true;
   if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
-  // Boost por duplo clique em tecla de movimento (consome estamina)
-  if(state==='play' && P.alive && P.stamina>15){
-    const moveKeys=['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowLeft','ArrowDown','ArrowRight'];
-    if(moveKeys.includes(e.code)){
-      const now=performance.now();
-      const last=P.lastKeyTimes[e.code]||0;
-      if(now-last<280){
-        // duplo clique detectado: ativa boost
-        P.boostActive=true;
-        P.boostTimer=1.2;
-        if(!MS.boostUsed){ MS.boostUsed=true; say('DRONE','Propulsores sobrecarregados — duplo clique ativa boost (consome estamina).'); }
-      }
-      P.lastKeyTimes[e.code]=now;
+  // Boost: segurar Shift ativa boost (consome estamina continuamente)
+  if(state==='play' && P.alive && (e.code==='ShiftLeft' || e.code==='ShiftRight')){
+    if(P.stamina>15 && !P.boostActive){
+      P.boostActive=true;
+      if(!MS.boostUsed){ MS.boostUsed=true; say('DRONE','Propulsores sobrecarregados — segure SHIFT para boost (consome estamina).'); }
     }
   }
   if(state==='hub'){
-    if(e.code==='Enter'||e.code==='Space'){ descendToMine(); }
+    if(e.code==='Enter'||e.code==='Space'){ if(researchOpen){ researchOpen=false; } else descendToMine(); }
     else if(e.code==='KeyV'){
       const earned = sellCrystals();
       if(earned>0){ say('BASE', 'Vendido por '+earned.toLocaleString('pt-BR')+' créditos.'); saveGame(); }
     }
-    else if(e.code==='Escape'){ state='title'; }
+    else if(e.code==='KeyR'){ researchOpen = !researchOpen; }
+    else if(e.code==='KeyN'){ confirmNewSeed = true; }
+    else if(e.code==='Escape'){
+      if(researchOpen){ researchOpen=false; }
+      else state='title';
+    }
+  }
+  else if(state==='play' && P.alive && isPersistentMode()){
+    if(e.code==='KeyB'){
+      // construir base no slot atual
+      const depth = (P.y-padY)|0;
+      const slot = getBaseAtDepth(depth);
+      if(slot && Math.abs(P.x-padX)<30){
+        if(!findBuiltBase(slot.depth)){
+          buildBase(slot);
+        }
+      }
+    }
+    else if(e.code==='KeyU'){
+      // evoluir base
+      const depth = (P.y-padY)|0;
+      const base = findBuiltBase(depth);
+      if(base && Math.abs(P.x-padX)<30){
+        upgradeBase(base);
+      }
+    }
+    else if(e.code==='KeyT'){
+      teleportToBase();
+    }
   }
   else if(state==='title'){
     if(e.code==='Enter'||e.code==='Space'){
@@ -3202,10 +3690,21 @@ cv.addEventListener('mousemove',e=>{
   // hub hover
   if(state==='hub' && !modMenuOpen){
     hubHoveredBtn = null;
-    for(const r of hubBtnRects){
-      if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
-        hubHoveredBtn = r.key;
-        break;
+    researchHovered = null;
+    // se painel de pesquisa aberto, hover nele
+    if(researchOpen){
+      for(const r of researchRects){
+        if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+          researchHovered = r.key;
+          break;
+        }
+      }
+    } else {
+      for(const r of hubBtnRects){
+        if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+          hubHoveredBtn = r.key;
+          break;
+        }
       }
     }
   }
@@ -3239,6 +3738,32 @@ cv.addEventListener('click',e=>{
   }
   // hub: clicar em botões
   if(state==='hub'){
+    // se modal de confirmação de nova seed estiver aberto
+    if(confirmNewSeed){
+      // clicar em qualquer lugar fecha (botões SIM/NÃO tratados no drawConfirmNewSeed)
+      // mas vamos tratar cliques nos botões específicos
+      for(const r of confirmRects){
+        if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+          if(r.action==='yes'){ confirmNewSeed=false; generateNewSeed(); }
+          else if(r.action==='no'){ confirmNewSeed=false; }
+          break;
+        }
+      }
+      return;
+    }
+    // se painel de pesquisa estiver aberto
+    if(researchOpen){
+      for(const r of researchRects){
+        if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
+          if(r.key === 'close'){ researchOpen = false; }
+          else if(r.key && canResearch(r.key)){
+            doResearch(r.key);
+          }
+          break;
+        }
+      }
+      return;
+    }
     for(const r of hubBtnRects){
       if(e.clientX>=r.x && e.clientX<=r.x+r.w && e.clientY>=r.y && e.clientY<=r.y+r.h){
         if(!r.enabled) break;
@@ -3250,8 +3775,9 @@ cv.addEventListener('click',e=>{
             saveGame();
           }
         }
+        else if(r.key==='pesquisa'){ researchOpen = true; }
+        else if(r.key==='newseed'){ confirmNewSeed = true; }
         else {
-          // upgrade
           const ok = buyUpgrade(r.key);
           if(ok) say('BASE', UPGRADES[r.key].name + ' melhorado para nível ' + upgradeLevel(r.key) + '.');
         }
@@ -3462,8 +3988,13 @@ function stepGame(){
     stepPickups();
     stepCore();
     stepTide();
+    stepBases();  // bases: cura, auto-extractor, teleport
     checkWin();
     checkZone();
+    // autorreparo (pesquisa)
+    if(isResearched('autoRepair') && P.alive && P.hp < P.maxHP){
+      P.hp = Math.min(P.maxHP, P.hp + 0.5/60);
+    }
     if(P.alive){
       // motes de poeira no facho da lanterna
       if(P.y>surf[P.x|0]&&Math.random()<0.3&&parts.length<MAXP-100){
@@ -3508,6 +4039,8 @@ function render(){
   drawPost();
   drawHud();
   drawScreens();
+  drawResearchPanel();
+  drawConfirmNewSeed();
   drawModMenu();
   drawConsole();
   lights.length=0;
@@ -3571,13 +4104,15 @@ function boot(){
   applyUpgrades();
   // Oil Era: tenta carregar save (modo persistente)
   if(isPersistentMode() && loadGame()){
-    // mundo carregado do save
-    placeBombCaches();  // reposiciona caches (não são persistidos)
+    placeBombCaches();
+    applyResearch();
   } else {
-    // sem save ou modo não-persistente: gera mundo novo
     genWorld();
     placeBombCaches();
-    if(isPersistentMode()) saveGame();  // salva mundo inicial
+    if(isPersistentMode()){
+      placeBaseSlots();
+      saveGame();
+    }
   }
   resize();
   camX=padX; camY=padY-30;
